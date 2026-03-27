@@ -1,0 +1,6 @@
+python-telegram-bot==20.5
+numpy
+Pillow
+websockets
+pytz
+nest-asyncio
