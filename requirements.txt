@@ -1,0 +1,6 @@
+python-telegram-bot==20.7
+websockets==11.0.3
+numpy==1.26.0
+pytz==2025.2
+nest_asyncio==1.6.0
+matplotlib==3.8.0
