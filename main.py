@@ -10,10 +10,9 @@ import websockets
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
-import cv2
-import pytesseract
 from PIL import Image
 from io import BytesIO
+import pytesseract
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -40,9 +39,9 @@ if not os.path.exists(LOG_FILE):
 # -------------------
 # GLOBAL VARIABLES
 # -------------------
-market_volatility = {}      # store tick history per symbol
-cooldown_tracker = {}       # prevent spamming same signals
-adaptive_trend_factor = {}  # weekly adaptive adjustment
+market_volatility = {}
+cooldown_tracker = {}
+adaptive_trend_factor = {}
 
 # -------------------
 # FETCH ALL SYMBOLS
@@ -186,13 +185,11 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # OCR
     text = pytesseract.image_to_string(img)
 
-    # Parse symbol and last price from OCR
-    # (Assuming your screenshot shows something like "BTCUSD 26850.5")
     try:
         parts = text.strip().split()
         symbol = parts[0]
         last_price = float(parts[1])
-        trade = analyze_pair(symbol, [last_price]*10)  # replicate for analyze_pair
+        trade = analyze_pair(symbol, [last_price]*10)
         if trade:
             await send_signal(trade, context)
             await update.message.reply_text(f"✅ Signal generated for {symbol}")
