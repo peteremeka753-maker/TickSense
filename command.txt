@@ -1,0 +1,11 @@
+ANALYZE CHART SCREENSHOT:
+
+1. Detect candlesticks trend.
+2. Identify Break of Structure (BoS).
+3. Identify Fair Value Gaps (FVG).
+4. Detect Demand and Supply zones.
+5. Determine direction: BUY / SELL / NO TRADE.
+6. Calculate TP and SL based on volatility and market structure.
+7. Output results in Excel-friendly format:
+   - Columns: Symbol, Direction, TP, SL, Timeframe, Demand Zone, Supply Zone
+8. Ensure the output is accurate and follows the latest screenshot input.
