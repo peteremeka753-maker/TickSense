@@ -39,7 +39,7 @@ if not os.path.exists(LOG_FILE):
 # GLOBAL VARIABLES
 # -------------------
 market_volatility = {}
-confidence_bias = {}
+confidence_bias = {}  # <-- stores adaptive learning from feedback
 cooldown_tracker = {}
 
 # -------------------
@@ -119,6 +119,11 @@ def detect_demand_supply(image: Image):
 def calculate_tp_sl(direction, bos, fvg, vol):
     base = 100
     risk = max(1, np.std(vol)*50 + (5 if fvg else 0))
+
+    # Apply learning bias from previous feedback
+    bias = confidence_bias.get(direction, 0)
+    risk *= (1 + bias)  # increase/decrease TP/SL distance slightly based on past WIN/LOSS
+
     if direction == "BUY":
         sl = base - risk
         tp = base + risk*2
@@ -126,7 +131,7 @@ def calculate_tp_sl(direction, bos, fvg, vol):
         sl = base + risk
         tp = base - risk*2
 
-    # FIX: Align timeframe with TP/SL distance (ensures Excel & TP match)
+    # FIX: Align timeframe with TP/SL distance
     distance = abs(tp - sl)
     if distance <= 5:
         timeframe = "M1"
@@ -139,7 +144,6 @@ def calculate_tp_sl(direction, bos, fvg, vol):
     else:
         timeframe = "H1"
 
-    # Return TP, SL, and aligned timeframe
     return round(tp,2), round(sl,2), timeframe
 
 # -------------------
@@ -161,6 +165,15 @@ def update_last_result(result):
     rows[-1][-1] = result
     with open(LOG_FILE, "w", newline="") as f:
         csv.writer(f).writerows(rows)
+
+    # -------------------
+    # ADAPTIVE LEARNING FROM FEEDBACK
+    # -------------------
+    last_direction = rows[-1][2]  # "direction" column
+    if result == "WIN":
+        confidence_bias[last_direction] = confidence_bias.get(last_direction, 0) + 0.05
+    else:  # LOSS
+        confidence_bias[last_direction] = confidence_bias.get(last_direction, 0) - 0.05
 
 # -------------------
 # TELEGRAM HANDLERS
