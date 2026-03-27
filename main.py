@@ -73,14 +73,14 @@ async def market_listener():
             await ws.send(json.dumps({"ticks": p, "subscribe": 1}))
             market_volatility[p] = []
 
-        async for msg in ws:
-            data = json.loads(msg)
-            if "tick" not in data:
-                continue
-            symbol = data["tick"]["symbol"]
-            quote = data["tick"]["quote"]
-            market_volatility[symbol].append(quote)
-            if len(market_volatility[symbol]) > 100:
+        async for msg in ws:  
+            data = json.loads(msg)  
+            if "tick" not in data:  
+                continue  
+            symbol = data["tick"]["symbol"]  
+            quote = data["tick"]["quote"]  
+            market_volatility[symbol].append(quote)  
+            if len(market_volatility[symbol]) > 100:  
                 market_volatility[symbol].pop(0)
 
 # -------------------
@@ -114,7 +114,7 @@ def detect_demand_supply(image: Image):
     return demand_zone, supply_zone
 
 # -------------------
-# TP/SL CALCULATION
+# TP/SL CALCULATION (FIXED TIMEFRAME ALIGNMENT)
 # -------------------
 def calculate_tp_sl(direction, bos, fvg, vol):
     base = 100
@@ -125,6 +125,8 @@ def calculate_tp_sl(direction, bos, fvg, vol):
     else:
         sl = base + risk
         tp = base - risk*2
+
+    # FIX: Align timeframe with TP/SL distance (ensures Excel & TP match)
     distance = abs(tp - sl)
     if distance <= 5:
         timeframe = "M1"
@@ -136,6 +138,8 @@ def calculate_tp_sl(direction, bos, fvg, vol):
         timeframe = "M30"
     else:
         timeframe = "H1"
+
+    # Return TP, SL, and aligned timeframe
     return round(tp,2), round(sl,2), timeframe
 
 # -------------------
@@ -182,14 +186,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Use volatility from the market listener
-    symbol = "SCREENSHOT"  # placeholder symbol for screenshot trades
+    symbol = "SCREENSHOT"
     vol = market_volatility.get(symbol, [1]*10)
     tp, sl, timeframe = calculate_tp_sl(direction, bos, fvg, vol)
 
     # Cooldown check
     last_time = cooldown_tracker.get(symbol)
     now = datetime.now(TIMEZONE)
-    if last_time and (now - last_time).total_seconds() < 600:  # 10 min cooldown
+    if last_time and (now - last_time).total_seconds() < 600:
         await update.message.reply_text("Cooldown active. Wait before sending another signal.")
         return
     cooldown_tracker[symbol] = now
