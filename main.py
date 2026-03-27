@@ -10,17 +10,17 @@ import websockets
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
+import pytesseract
 from PIL import Image
 from io import BytesIO
-import pytesseract
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
 # -------------------
 # CONFIG
 # -------------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+BOT_TOKEN = "8581515208:AAFWsel7xveab0iMmDE3NJ_5Ow3I4uaSvQo"
+CHAT_ID = "8308393231"
 DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 DATA_DIR = "data"
@@ -39,9 +39,9 @@ if not os.path.exists(LOG_FILE):
 # -------------------
 # GLOBAL VARIABLES
 # -------------------
-market_volatility = {}
-cooldown_tracker = {}
-adaptive_trend_factor = {}
+market_volatility = {}      # store tick history per symbol
+cooldown_tracker = {}       # prevent spamming same signals
+adaptive_trend_factor = {}  # weekly adaptive adjustment
 
 # -------------------
 # FETCH ALL SYMBOLS
@@ -85,11 +85,11 @@ async def market_listener():
 # SIGNAL GENERATION (TP/SL FIXED)
 # -------------------
 def analyze_pair(symbol, ticks):
-    if len(ticks) < 10:
+    if len(ticks) < 1:
         return None
 
     series = np.array(ticks)
-    ma = np.mean(series[-10:])
+    ma = np.mean(series)
     last = series[-1]
     factor = adaptive_trend_factor.get(symbol, 1.0)
 
@@ -100,7 +100,7 @@ def analyze_pair(symbol, ticks):
     else:
         return None
 
-    vol = np.std(series[-10:]) + 1e-5
+    vol = np.std(series) + 1e-5
     base = last
     risk_multiplier = 50
     if direction == "BUY":
@@ -185,15 +185,25 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # OCR
     text = pytesseract.image_to_string(img)
 
+    # Parse any symbol and last price from OCR
     try:
-        parts = text.strip().split()
-        symbol = parts[0]
-        last_price = float(parts[1])
-        trade = analyze_pair(symbol, [last_price]*10)
-        if trade:
-            await send_signal(trade, context)
-            await update.message.reply_text(f"✅ Signal generated for {symbol}")
-        else:
+        lines = text.strip().splitlines()
+        found = False
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                symbol_candidate = parts[0].upper()
+                try:
+                    last_price = float(parts[1].replace(',', ''))
+                    trade = analyze_pair(symbol_candidate, [last_price]*10)
+                    if trade:
+                        await send_signal(trade, context)
+                        await update.message.reply_text(f"✅ Signal generated for {symbol_candidate}")
+                        found = True
+                        break
+                except:
+                    continue
+        if not found:
             await update.message.reply_text("No valid signal found in the screenshot.")
     except Exception as e:
         await update.message.reply_text(f"Error processing screenshot: {e}")
