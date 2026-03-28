@@ -1,5 +1,5 @@
 # ======================================
-# AI TRADER WITH AUTOMATIC PAIRS FETCHING + CANDLESTICKS + BoS + FVG + DEMAND/SUPPLY + LEARNING
+# AI TRADER WITH AUTOMATIC PAIRS FETCHING + SMART READER + LEARNING
 # ======================================
 
 import os
@@ -8,7 +8,7 @@ import json
 import asyncio
 import websockets
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 import pytz
 from PIL import Image
@@ -39,90 +39,84 @@ if not os.path.exists(LOG_FILE):
 # GLOBAL VARIABLES
 # -------------------
 market_volatility = {}
-confidence_bias = {}  # <-- stores adaptive learning from feedback
+confidence_bias = {}
 cooldown_tracker = {}
 
 # -------------------
-# HELPER FUNCTIONS
-# -------------------
-async def fetch_all_pairs(ws):
-    """
-    Fetch all available market symbols including OTC and top 7 crypto.
-    """
-    await ws.send(json.dumps({"active_symbols": "brief"}))
-    while True:
-        msg = await ws.recv()
-        data = json.loads(msg)
-        if "active_symbols" in data:
-            symbols = [s["symbol"] for s in data["active_symbols"]]
-            otc_pairs = [s for s in symbols if s.startswith("OTC")]
-            crypto_pairs = ["CRYPTO:BTCUSD","CRYPTO:ETHUSD","CRYPTO:XRPUSD",
-                            "CRYPTO:LTCUSD","CRYPTO:BCHUSD","CRYPTO:ADAUSD","CRYPTO:DOGEUSD"]
-            return otc_pairs + crypto_pairs
-
-# -------------------
-# MARKET LISTENER
+# SAFE MARKET LISTENER (ANTI-CRASH)
 # -------------------
 async def market_listener():
     global market_volatility
-    async with websockets.connect(DERIV_WS) as ws:
-        pairs = await fetch_all_pairs(ws)
-        print(f"Monitoring {len(pairs)} symbols: {pairs}")
-        # Subscribe to all symbols
-        for p in pairs:
-            await ws.send(json.dumps({"ticks": p, "subscribe": 1}))
-            market_volatility[p] = []
+    while True:
+        try:
+            async with websockets.connect(DERIV_WS, ping_interval=20, ping_timeout=10) as ws:
+                await ws.send(json.dumps({"active_symbols": "brief"}))
+                data = json.loads(await ws.recv())
 
-        async for msg in ws:  
-            data = json.loads(msg)  
-            if "tick" not in data:  
-                continue  
-            symbol = data["tick"]["symbol"]  
-            quote = data["tick"]["quote"]  
-            market_volatility[symbol].append(quote)  
-            if len(market_volatility[symbol]) > 100:  
-                market_volatility[symbol].pop(0)
+                symbols = [s["symbol"] for s in data["active_symbols"]]
+                pairs = [s for s in symbols if s.startswith("OTC")]
+
+                for p in pairs:
+                    await ws.send(json.dumps({"ticks": p, "subscribe": 1}))
+                    market_volatility[p] = []
+
+                async for msg in ws:
+                    data = json.loads(msg)
+                    if "tick" not in data:
+                        continue
+                    symbol = data["tick"]["symbol"]
+                    quote = data["tick"]["quote"]
+
+                    market_volatility[symbol].append(quote)
+                    if len(market_volatility[symbol]) > 100:
+                        market_volatility[symbol].pop(0)
+
+        except Exception as e:
+            print("Reconnecting WebSocket...", e)
+            await asyncio.sleep(3)
 
 # -------------------
-# CANDLESTICKS, BoS & FVG DETECTION
+# 🔥 SMART CANDLE READER (NEW)
 # -------------------
-def detect_candles_bos_fvg(image: Image):
+def analyze_chart(image: Image):
     img = np.array(image.convert("L"))
-    series = np.mean(img, axis=0)
-    series = (series - np.min(series)) / (np.max(series) - np.min(series) + 1e-9)
-    trend = series[-1] - series[0]
-    diff = np.diff(series)
-    bos = np.any(np.abs(diff) > 0.08)
-    fvg = np.any(np.abs(diff) > 0.05) and bos
-    if trend > 0.05 and bos:
+
+    h, w = img.shape
+    left = np.mean(img[:, :w//3])
+    right = np.mean(img[:, -w//3:])
+    trend = right - left
+
+    vertical = np.mean(img, axis=1)
+    wick_strength = np.std(vertical)
+
+    momentum = np.std(np.diff(np.mean(img, axis=0)))
+
+    # Detect direction
+    if trend > 2 and momentum > 1:
         direction = "BUY"
-    elif trend < -0.05 and bos:
+    elif trend < -2 and momentum > 1:
         direction = "SELL"
     else:
         direction = "NO TRADE"
-    return direction, bos, fvg
+
+    # Simulated BoS / FVG
+    bos = momentum > 1.2
+    fvg = wick_strength > 20
+
+    demand_zone = round(np.min(img)/255*100,2)
+    supply_zone = round(np.max(img)/255*100,2)
+
+    return direction, bos, fvg, demand_zone, supply_zone
 
 # -------------------
-# DEMAND/SUPPLY DETECTION
-# -------------------
-def detect_demand_supply(image: Image):
-    img = np.array(image.convert("L"))
-    series = np.mean(img, axis=0)
-    series = (series - np.min(series)) / (np.max(series) - np.min(series) + 1e-9)
-    demand_zone = round(np.min(series)*100,2)
-    supply_zone = round(np.max(series)*100,2)
-    return demand_zone, supply_zone
-
-# -------------------
-# TP/SL CALCULATION (FIXED TIMEFRAME ALIGNMENT)
+# TP/SL WITH LEARNING
 # -------------------
 def calculate_tp_sl(direction, bos, fvg, vol):
     base = 100
     risk = max(1, np.std(vol)*50 + (5 if fvg else 0))
 
-    # Apply learning bias from previous feedback
     bias = confidence_bias.get(direction, 0)
-    risk *= (1 + bias)  # increase/decrease TP/SL distance slightly based on past WIN/LOSS
+    risk *= (1 + bias)
 
     if direction == "BUY":
         sl = base - risk
@@ -131,8 +125,8 @@ def calculate_tp_sl(direction, bos, fvg, vol):
         sl = base + risk
         tp = base - risk*2
 
-    # FIX: Align timeframe with TP/SL distance
     distance = abs(tp - sl)
+
     if distance <= 5:
         timeframe = "M1"
     elif distance <= 10:
@@ -156,82 +150,86 @@ def save_trade(symbol, direction, tp, sl, timeframe, demand_zone, supply_zone):
         ])
 
 # -------------------
-# UPDATE RESULT
+# UPDATE RESULT (LEARNING)
 # -------------------
 def update_last_result(result):
     rows = []
     with open(LOG_FILE, "r") as f:
         rows = list(csv.reader(f))
+
     rows[-1][-1] = result
+
     with open(LOG_FILE, "w", newline="") as f:
         csv.writer(f).writerows(rows)
 
-    # -------------------
-    # ADAPTIVE LEARNING FROM FEEDBACK
-    # -------------------
-    last_direction = rows[-1][2]  # "direction" column
+    last_direction = rows[-1][2]
+
     if result == "WIN":
         confidence_bias[last_direction] = confidence_bias.get(last_direction, 0) + 0.05
-    else:  # LOSS
+    else:
         confidence_bias[last_direction] = confidence_bias.get(last_direction, 0) - 0.05
 
 # -------------------
 # TELEGRAM HANDLERS
 # -------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send your chart screenshot to analyze.")
+    await update.message.reply_text("Send chart screenshot.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global cooldown_tracker
+
     photo = update.message.photo[-1]
     file = await photo.get_file()
+
     bio = BytesIO()
     await file.download_to_memory(bio)
     bio.seek(0)
     image = Image.open(bio)
 
-    # Detect candlesticks
-    direction, bos, fvg = detect_candles_bos_fvg(image)
-    demand_zone, supply_zone = detect_demand_supply(image)
+    # 🔥 SMART ANALYSIS
+    direction, bos, fvg, demand_zone, supply_zone = analyze_chart(image)
 
     if direction == "NO TRADE":
-        await update.message.reply_text("No valid setup detected.")
+        await update.message.reply_text("No valid setup.")
         return
 
-    # Use volatility from the market listener
     symbol = "SCREENSHOT"
     vol = market_volatility.get(symbol, [1]*10)
+
     tp, sl, timeframe = calculate_tp_sl(direction, bos, fvg, vol)
 
-    # Cooldown check
-    last_time = cooldown_tracker.get(symbol)
     now = datetime.now(TIMEZONE)
+    last_time = cooldown_tracker.get(symbol)
+
     if last_time and (now - last_time).total_seconds() < 600:
-        await update.message.reply_text("Cooldown active. Wait before sending another signal.")
+        await update.message.reply_text("Cooldown active.")
         return
+
     cooldown_tracker[symbol] = now
 
     save_trade(symbol, direction, tp, sl, timeframe, demand_zone, supply_zone)
 
-    keyboard = [
-        [InlineKeyboardButton("✅ WIN", callback_data="win"),
-         InlineKeyboardButton("❌ LOSS", callback_data="loss")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = [[
+        InlineKeyboardButton("✅ WIN", callback_data="win"),
+        InlineKeyboardButton("❌ LOSS", callback_data="loss")
+    ]]
+
     msg = f"""
 📊 SIGNAL
 Direction: {direction}
 TP: {tp}
 SL: {sl}
 Timeframe: {timeframe}
-Demand Zone: {demand_zone}
-Supply Zone: {supply_zone}
+Demand: {demand_zone}
+Supply: {supply_zone}
 """
-    await update.message.reply_text(msg, reply_markup=reply_markup)
+
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     if query.data == "win":
         update_last_result("WIN")
         await query.edit_message_text("Recorded: WIN ✅")
@@ -244,11 +242,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_button))
+
     asyncio.create_task(market_listener())
-    print("Bot running...")
+
+    print("Bot running (SMART MODE)...")
     await app.run_polling()
 
 # -------------------
@@ -257,6 +258,7 @@ async def main():
 if __name__ == "__main__":
     import nest_asyncio
     nest_asyncio.apply()
+
     loop = asyncio.get_event_loop()
     loop.create_task(main())
     loop.run_forever()
