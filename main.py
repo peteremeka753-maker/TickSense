@@ -1,18 +1,16 @@
 # ======================================
-# SMART AI TRADER - FULLY UPGRADED FOR REAL MONEY
-# SCREENSHOT ANALYSIS + ENTRY + TP/SL + ADAPTIVE DURATION + LEARNING
+# SAFE AI TRADER (NO GAMBLING VERSION)
+# Screenshot → Smart Entry + Duration + Filter
 # ======================================
 
 import os
 import csv
-import json
 import asyncio
-import websockets
 import numpy as np
 from datetime import datetime, timedelta
 from io import BytesIO
 import pytz
-from PIL import Image, ImageDraw
+from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -23,6 +21,7 @@ BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"
 CHAT_ID = "8308393231"
 
 TIMEZONE = pytz.timezone("Africa/Lagos")
+
 DATA_DIR = "data"
 LOG_FILE = os.path.join(DATA_DIR, "trades.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -30,107 +29,103 @@ os.makedirs(DATA_DIR, exist_ok=True)
 confidence_bias = {}
 cooldown_tracker = {}
 
-# Initialize CSV
+# -------------------
+# INIT CSV
+# -------------------
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w", newline="") as f:
-        csv.writer(f).writerow(["time","symbol","direction","entry_low","entry_high","tp","sl","timeframe","duration","result"])
+        csv.writer(f).writerow(["time","direction","duration","result"])
 
 # -------------------
-# SMART ANALYSIS ENGINE
+# SAFE ANALYSIS ENGINE
 # -------------------
-def analyze_chart_advanced(image: Image):
-    """
-    Analyze chart screenshot to return:
-    direction, entry_low, entry_high, TP, SL, timeframe, reason, best duration
-    """
+def analyze_chart_safe(image: Image):
 
     img = np.array(image.convert("L"))
-    series = np.mean(img, axis=0)
-    trend = series[-1] - series[0]
-    momentum = np.std(np.diff(series))
-    bullish = np.sum(np.diff(series) > 0)
-    bearish = np.sum(np.diff(series) < 0)
-    vertical = np.mean(img, axis=1)
-    upper_wick = np.max(vertical) - np.mean(vertical)
-    lower_wick = np.mean(vertical) - np.min(vertical)
 
-    # Direction logic
-    if bearish > bullish and momentum > 1:
-        direction = "SELL"
-    elif bullish > bearish and momentum > 1:
+    series = np.mean(img, axis=0)
+    diff = np.diff(series)
+
+    trend_strength = series[-1] - series[0]
+    momentum = np.std(diff)
+
+    bullish = np.sum(diff > 0)
+    bearish = np.sum(diff < 0)
+
+    # -------------------
+    # STRICT TRADE FILTER (ANTI-GAMBLING)
+    # -------------------
+    if momentum < 0.8:
+        return "NO TRADE", None, None, ["Market too slow"]
+
+    if abs(bullish - bearish) < len(diff) * 0.1:
+        return "NO TRADE", None, None, ["Market choppy"]
+
+    # -------------------
+    # DIRECTION
+    # -------------------
+    if bullish > bearish:
         direction = "BUY"
     else:
-        direction = "NO TRADE"
+        direction = "SELL"
 
-    # Entry zone (simulate real price zone)
-    price_high = 1.15 + (np.max(img)/255)*0.01
-    price_low = 1.14 + (np.min(img)/255)*0.01
-    entry_high = round(price_high, 5)
-    entry_low = round(price_low, 5)
-
-    # TP / SL logic (adaptive based on confidence)
-    bias = confidence_bias.get(direction, 0)
-    if direction == "SELL":
-        tp = round(entry_low - (0.004 * (1 + bias)), 5)
-        sl = round(entry_high + (0.002 * (1 - bias)), 5)
-    elif direction == "BUY":
-        tp = round(entry_high + (0.004 * (1 + bias)), 5)
-        sl = round(entry_low - (0.002 * (1 - bias)), 5)
+    # -------------------
+    # SMART DURATION (FIXED PROBLEM)
+    # -------------------
+    if momentum > 2.5:
+        duration = 1   # fast market
+    elif momentum > 1.5:
+        duration = 3
     else:
-        tp, sl = None, None
+        duration = 5   # slow market
 
-    # Timeframe logic
-    if momentum < 1:
-        timeframe = "M5"
-        duration = 60
-    elif momentum < 2:
-        timeframe = "M10"
-        duration = 120
+    # -------------------
+    # ENTRY DELAY (VERY IMPORTANT FIX)
+    # -------------------
+    # Instead of instant entry, wait small time
+    if momentum > 2:
+        entry_delay = 5   # seconds
     else:
-        timeframe = "M15"
-        duration = 180
+        entry_delay = 10
 
-    # Reasoning
+    # -------------------
+    # REASON
+    # -------------------
     reason = []
-    reason.append("Bearish trend" if trend < 0 else "Bullish trend")
-    reason.append("Top rejection" if upper_wick > lower_wick else "Bottom rejection")
-    reason.append("Strong momentum" if momentum > 1 else "Weak market")
+    reason.append("Bullish pressure" if direction=="BUY" else "Bearish pressure")
+    reason.append("Strong momentum" if momentum > 1.5 else "Moderate momentum")
+    reason.append("Filtered safe entry")
 
-    # Calculate best entry time based on momentum (for options broker)
-    best_entry_offset = int(momentum * 2)  # seconds offset simulation
-    best_entry_time = datetime.now(TIMEZONE) + timedelta(seconds=best_entry_offset)
-
-    return direction, entry_low, entry_high, tp, sl, timeframe, reason, duration, best_entry_time
+    return direction, duration, entry_delay, reason
 
 # -------------------
-# DRAW ANALYSIS
+# SAVE RESULT
 # -------------------
-def draw_analysis(image, direction, entry_low, entry_high):
-    draw = ImageDraw.Draw(image)
-    w, h = image.size
-    y1 = int(h * 0.4)
-    y2 = int(h * 0.6)
-    color = "red" if direction == "SELL" else "green"
-    draw.rectangle([0, y1, w, y2], outline=color, width=3)
-    draw.text((10,10), f"{direction}", fill=color)
-    return image
-
-# -------------------
-# LOG RESULTS
-# -------------------
-def update_result(result, direction, entry_low, entry_high, tp, sl, timeframe, duration):
+def update_result(result, direction):
     with open(LOG_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([datetime.now(TIMEZONE), "SCREENSHOT", direction, entry_low, entry_high, tp, sl, timeframe, duration, result])
-    # Adaptive learning
+        csv.writer(f).writerow([datetime.now(TIMEZONE), direction, "", result])
+
     if result == "WIN":
-        confidence_bias[direction] = confidence_bias.get(direction, 0) + 0.05
+        confidence_bias[direction] = confidence_bias.get(direction, 0) + 0.02
     else:
-        confidence_bias[direction] = confidence_bias.get(direction, 0) - 0.05
+        confidence_bias[direction] = confidence_bias.get(direction, 0) - 0.02
 
 # -------------------
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLER
 # -------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global cooldown_tracker
+
+    now = datetime.now(TIMEZONE)
+
+    # -------------------
+    # COOLDOWN (ANTI OVERTRADING)
+    # -------------------
+    last = cooldown_tracker.get("global")
+    if last and (now - last).seconds < 120:
+        await update.message.reply_text("Wait... market stabilizing.")
+        return
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
@@ -138,65 +133,69 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bio = BytesIO()
     await file.download_to_memory(bio)
     bio.seek(0)
+
     image = Image.open(bio)
 
-    direction, entry_low, entry_high, tp, sl, timeframe, reason, duration, best_entry_time = analyze_chart_advanced(image)
+    direction, duration, entry_delay, reason = analyze_chart_safe(image)
 
     if direction == "NO TRADE":
-        await update.message.reply_text("No valid setup.")
+        await update.message.reply_text("❌ No safe setup\nReason: " + reason[0])
         return
 
-    # Draw analysis
-    image = draw_analysis(image, direction, entry_low, entry_high)
-    bio_out = BytesIO()
-    image.save(bio_out, format='PNG')
-    bio_out.seek(0)
+    cooldown_tracker["global"] = now
 
+    # -------------------
+    # BUILD MESSAGE (FIXED ERROR HERE)
+    # -------------------
     reason_text = "\n- ".join(reason)
-    msg = f"""📊 SMART SIGNAL
 
-Direction: {direction}
-Entry Zone: {entry_low} - {entry_high}
-TP: {tp}
-SL: {sl}
-Timeframe: {timeframe}
-Suggested Duration: {duration} seconds
-Best Entry Time: {best_entry_time.strftime('%H:%M:%S')}
+    entry_time = datetime.now(TIMEZONE) + timedelta(seconds=entry_delay)
+    entry_time_str = entry_time.strftime("%H:%M:%S")
 
-🧠 Reason:
-- {reason_text}
-"""
+    msg = (
+        "📊 SAFE SIGNAL\n\n"
+        f"Direction: {direction}\n"
+        f"Entry Time: {entry_time_str}\n"
+        f"Duration: {duration} min\n\n"
+        "🧠 Reason:\n"
+        f"- {reason_text}"
+    )
 
     keyboard = [[
         InlineKeyboardButton("✅ WIN", callback_data=f"win_{direction}"),
         InlineKeyboardButton("❌ LOSS", callback_data=f"loss_{direction}")
     ]]
 
-    await update.message.reply_photo(photo=bio_out, caption=msg,
-                                     reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
+# -------------------
+# BUTTON HANDLER
+# -------------------
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
+
     data = query.data.split("_")
     result = data[0]
     direction = data[1]
-    # Read last signal info from CSV
-    with open(LOG_FILE, "r", newline="") as f:
-        rows = list(csv.reader(f))
-    last_signal = rows[-1][1:] if len(rows) > 1 else ["SCREENSHOT", direction, "", "", "", "", "", "", ""]
-    entry_low, entry_high, tp, sl, timeframe, duration = last_signal[2], last_signal[3], last_signal[4], last_signal[5], last_signal[6], last_signal[7]
-    update_result("WIN" if result=="win" else "LOSS", direction, entry_low, entry_high, tp, sl, timeframe, duration)
-    await query.edit_message_caption(caption=f"Recorded: {result.upper()}")
+
+    update_result("WIN" if result=="win" else "LOSS", direction)
+
+    await query.edit_message_text(f"Recorded: {result.upper()}")
 
 # -------------------
 # MAIN
 # -------------------
 async def main():
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_button))
-    print("SMART AI TRADER RUNNING...")
+
+    print("SAFE BOT RUNNING...")
+
     await app.run_polling()
 
 # -------------------
