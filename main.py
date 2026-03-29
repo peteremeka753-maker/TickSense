@@ -29,6 +29,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 confidence_bias = {}
 cooldown_tracker = {}
 loss_streak = 0
+loss_pause_until = None  # ✅ ADDED (pause timer)
 
 # -------------------
 # INIT CSV
@@ -51,14 +52,8 @@ def analyze_chart(image: Image):
 
     reason = []
 
-    # -------------------
-    # DIRECTION
-    # -------------------
     direction = "BUY" if bullish > bearish else "SELL"
 
-    # -------------------
-    # ADAPTIVE DURATION
-    # -------------------
     if momentum > 2.5:
         duration = 1
     elif momentum > 1.5:
@@ -66,14 +61,8 @@ def analyze_chart(image: Image):
     else:
         duration = 5
 
-    # -------------------
-    # ADAPTIVE ENTRY DELAY
-    # -------------------
     entry_delay = 5 if momentum > 2 else 10
 
-    # -------------------
-    # SMART FILTERS
-    # -------------------
     if momentum < 0.5:
         reason.append("Market too slow")
     if abs(bullish - bearish) < len(diff)*0.05:
@@ -83,7 +72,6 @@ def analyze_chart(image: Image):
     reason.append("Safe filtered trade")
     reason.append("Adaptive entry & duration based on momentum")
 
-    # If only choppy or too slow, still try to suggest a trade (more realistic)
     if "Market too slow" in reason or "Market choppy" in reason:
         reason.append("Trade suggested despite warning")
 
@@ -93,34 +81,41 @@ def analyze_chart(image: Image):
 # UPDATE RESULT & LEARNING
 # -------------------
 def update_result(result, direction):
-    global loss_streak
+    global loss_streak, loss_pause_until
 
     with open(LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([datetime.now(TIMEZONE), direction, "", result])
 
-    # Adaptive confidence learning
     if result == "WIN":
         confidence_bias[direction] = confidence_bias.get(direction, 0) + 0.02
         loss_streak = 0
+        loss_pause_until = None  # ✅ RESET PAUSE
     else:
         confidence_bias[direction] = confidence_bias.get(direction, 0) - 0.02
         loss_streak += 1
+
+        # ✅ START 12 MINUTES PAUSE AFTER 3 LOSSES
+        if loss_streak >= 3:
+            loss_pause_until = datetime.now(TIMEZONE) + timedelta(minutes=12)
 
 # -------------------
 # TELEGRAM PHOTO HANDLER
 # -------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    global cooldown_tracker, loss_streak
+    global cooldown_tracker, loss_streak, loss_pause_until
 
     now = datetime.now(TIMEZONE)
 
-    # -------------------
-    # LOSS PROTECTION
-    # -------------------
-    if loss_streak >= 3:
-        await update.message.reply_text("🛑 Trading paused (loss protection). Wait.")
-        return
+    # ✅ LOSS PAUSE CHECK (12 minutes)
+    if loss_pause_until:
+        if now < loss_pause_until:
+            remaining = int((loss_pause_until - now).seconds / 60)
+            await update.message.reply_text(f"🛑 Cooling down. Try again in {remaining} min.")
+            return
+        else:
+            loss_pause_until = None
+            loss_streak = 0
 
     # -------------------
     # COOLDOWN
@@ -141,9 +136,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cooldown_tracker["global"] = now
 
-    # -------------------
-    # BUILD MESSAGE
-    # -------------------
     reason_text = "\n- ".join(reason)
     entry_time = datetime.now(TIMEZONE) + timedelta(seconds=entry_delay)
     entry_time_str = entry_time.strftime("%H:%M:%S")
@@ -173,13 +165,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await query.answer()
     except:
-        pass  # Ignore "query too old" errors
+        pass
 
     data = query.data.split("_")
     result = data[0]
     direction = data[1]
 
     update_result("WIN" if result=="win" else "LOSS", direction)
+
     try:
         await query.edit_message_text(f"Recorded: {result.upper()}")
     except:
