@@ -1,7 +1,6 @@
 # ======================================
-# FINAL SAFE AI TRADER - PRODUCTION READY
-# Screenshot → Smart Entry + Duration + Adaptive Learning
-# Handles millions of trades, human-like learning, no placeholders
+# SAFE AI TRADER (STABLE + CONTROLLED)
+# Designed to protect you, not overtrade
 # ======================================
 
 import os
@@ -18,18 +17,17 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandle
 # -------------------
 # CONFIG
 # -------------------
-BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"  # Fill this
-CHAT_ID = "8308393231"      # Fill this
+BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"
+CHAT_ID = "8308393231"
 
 TIMEZONE = pytz.timezone("Africa/Lagos")
+
 DATA_DIR = "data"
 LOG_FILE = os.path.join(DATA_DIR, "trades.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-confidence_bias = {}
-cooldown_tracker = {}
+confidence_bias = {"BUY": 0, "SELL": 0}
 loss_streak = 0
-loss_pause_until = None  # ✅ ADDED (pause timer)
 
 # -------------------
 # INIT CSV
@@ -39,115 +37,136 @@ if not os.path.exists(LOG_FILE):
         csv.writer(f).writerow(["time","direction","duration","result"])
 
 # -------------------
-# SAFE ANALYSIS ENGINE
+# SAFE ANALYSIS
 # -------------------
 def analyze_chart(image: Image):
 
     img = np.array(image.convert("L"))
     series = np.mean(img, axis=0)
     diff = np.diff(series)
+
     momentum = np.std(diff)
     bullish = np.sum(diff > 0)
     bearish = np.sum(diff < 0)
 
-    reason = []
-
     direction = "BUY" if bullish > bearish else "SELL"
 
+    trend_strength = abs(bullish - bearish) / len(diff)
+
+    # -------------------
+    # SCORE (REALISTIC)
+    # -------------------
+    score = 50
+
+    if momentum > 1.5:
+        score += 8
+    if momentum > 2.5:
+        score += 5
+
+    if trend_strength > 0.2:
+        score += 8
+    if trend_strength > 0.3:
+        score += 5
+
+    score += confidence_bias[direction] * 100
+
+    score = max(50, min(72, score))
+
+    # -------------------
+    # MARKET WARNINGS
+    # -------------------
+    warnings = []
+
+    if momentum < 0.6:
+        warnings.append("Slow market ⚠️")
+        score -= 5
+
+    if trend_strength < 0.1:
+        warnings.append("Choppy market ⚠️")
+        score -= 5
+
+    # -------------------
+    # DURATION
+    # -------------------
     if momentum > 2.5:
         duration = 1
+        timeframe = "M1"
     elif momentum > 1.5:
         duration = 3
+        timeframe = "M5"
     else:
         duration = 5
+        timeframe = "M5"
 
-    entry_delay = 5 if momentum > 2 else 10
+    # -------------------
+    # ENTRY TIME
+    # -------------------
+    if score >= 65:
+        delay = 3
+    elif score >= 60:
+        delay = 6
+    else:
+        delay = 10
 
-    if momentum < 0.5:
-        reason.append("Market too slow")
-    if abs(bullish - bearish) < len(diff)*0.05:
-        reason.append("Market choppy")
+    # -------------------
+    # QUALITY LABEL
+    # -------------------
+    if score >= 68:
+        quality = "HIGH"
+    elif score >= 60:
+        quality = "MEDIUM"
+    else:
+        quality = "LOW ⚠️"
 
-    reason.append("Bullish pressure" if direction=="BUY" else "Bearish pressure")
-    reason.append("Safe filtered trade")
-    reason.append("Adaptive entry & duration based on momentum")
-
-    if "Market too slow" in reason or "Market choppy" in reason:
-        reason.append("Trade suggested despite warning")
-
-    return direction, duration, entry_delay, reason
+    return direction, duration, delay, timeframe, int(score), quality, warnings
 
 # -------------------
-# UPDATE RESULT & LEARNING
+# LEARNING
 # -------------------
 def update_result(result, direction):
-    global loss_streak, loss_pause_until
+    global loss_streak
 
     with open(LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([datetime.now(TIMEZONE), direction, "", result])
 
     if result == "WIN":
-        confidence_bias[direction] = confidence_bias.get(direction, 0) + 0.02
+        confidence_bias[direction] += 0.01
         loss_streak = 0
-        loss_pause_until = None  # ✅ RESET PAUSE
     else:
-        confidence_bias[direction] = confidence_bias.get(direction, 0) - 0.02
+        confidence_bias[direction] -= 0.01
         loss_streak += 1
 
-        # ✅ START 12 MINUTES PAUSE AFTER 3 LOSSES
-        if loss_streak >= 3:
-            loss_pause_until = datetime.now(TIMEZONE) + timedelta(minutes=12)
-
 # -------------------
-# TELEGRAM PHOTO HANDLER
+# HANDLE PHOTO
 # -------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    global cooldown_tracker, loss_streak, loss_pause_until
-
-    now = datetime.now(TIMEZONE)
-
-    # ✅ LOSS PAUSE CHECK (12 minutes)
-    if loss_pause_until:
-        if now < loss_pause_until:
-            remaining = int((loss_pause_until - now).seconds / 60)
-            await update.message.reply_text(f"🛑 Cooling down. Try again in {remaining} min.")
-            return
-        else:
-            loss_pause_until = None
-            loss_streak = 0
-
-    # -------------------
-    # COOLDOWN
-    # -------------------
-    last = cooldown_tracker.get("global")
-    if last and (now - last).seconds < 60:
-        await update.message.reply_text("⏳ Wait... market stabilizing.")
-        return
+    global loss_streak
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
+
     bio = BytesIO()
     await file.download_to_memory(bio)
     bio.seek(0)
+
     image = Image.open(bio)
 
-    direction, duration, entry_delay, reason = analyze_chart(image)
+    direction, duration, delay, timeframe, score, quality, warnings = analyze_chart(image)
 
-    cooldown_tracker["global"] = now
-
-    reason_text = "\n- ".join(reason)
-    entry_time = datetime.now(TIMEZONE) + timedelta(seconds=entry_delay)
-    entry_time_str = entry_time.strftime("%H:%M:%S")
+    entry_time = datetime.now(TIMEZONE) + timedelta(seconds=delay)
 
     msg = (
-        "📊 FINAL SAFE SIGNAL\n\n"
+        "📊 SAFE SIGNAL\n\n"
         f"Direction: {direction}\n"
-        f"Entry Time: {entry_time_str}\n"
-        f"Duration: {duration} min\n\n"
-        "🧠 Reason:\n"
-        f"- {reason_text}"
+        f"Entry: {entry_time.strftime('%H:%M:%S')}\n"
+        f"Duration: {duration} min\n"
+        f"Timeframe: {timeframe}\n\n"
+        f"Accuracy: {score}% ({quality})\n"
     )
+
+    if warnings:
+        msg += "\n⚠️ Warnings:\n- " + "\n- ".join(warnings)
 
     keyboard = [[
         InlineKeyboardButton("✅ WIN", callback_data=f"win_{direction}"),
@@ -182,12 +201,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # -------------------
 async def main():
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_button))
 
-    print("FINAL SAFE BOT RUNNING...")
+    print("SAFE BOT RUNNING...")
+
     await app.run_polling()
 
 # -------------------
