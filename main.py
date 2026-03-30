@@ -1,159 +1,296 @@
-# ======================================
-# BALANCED SAFE OPTIONS BOT
-# Strict + Responsive + No Overtrading
+The one script# ======================================
+# POCKET OPTION OTC SIGNAL BOT
+# HIGH ACCURACY DAY TRADING VERSION
+# STRICT + STABLE (NO FAKE BOOSTING)
 # ======================================
 
 import asyncio
+import json
+import requests
+import websockets
+import logging
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# -------------------
-# CONFIG
-# -------------------
+# ================================
+# TELEGRAM SETTINGS
+# ================================
 BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"
+CHAT_ID = "8308393231"
+
+# ================================
+# GENERAL SETTINGS
+# ================================
+DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 
-PAIRS = [
-    "EURUSD OTC","GBPUSD OTC","USDJPY OTC","AUDUSD OTC","USDCAD OTC",
-    "EURGBP OTC","EURJPY OTC","GBPJPY OTC","AUDJPY OTC","NZDUSD OTC",
-    "USDCHF OTC","EURCHF OTC","GBPCHF OTC","AUDCAD OTC","EURAUD OTC",
-    "GBPAUD OTC","NZDJPY OTC","CADJPY OTC","CHFJPY OTC","EURCAD OTC"
-]
+TREND_SCORE_THRESHOLD = 65
+TREND_STRENGTH_THRESHOLD = 60
 
-TIMEFRAMES = ["5s","10s","1m","2m","3m","5m"]
+ENTRY_DELAY = 2
+MG_STEP = 2
+MAX_MG_STEPS = 3
+EXPIRY_MINUTES = 2
 
-user_state = {}
+MAX_PRICES = 700
+RETRY_SECONDS = 5
 
-# -------------------
-# BALANCED ANALYSIS ENGINE
-# -------------------
-def generate_signal():
+TICK_CONFIRMATION = 5  # stricter
 
-    # simulate structured market movement
-    data = np.random.normal(0, 1, 120)
+# ================================
+# BLOCKED PAIRS
+# ================================
+BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
-    trend = np.mean(data[-15:])
-    volatility = np.std(data)
+# ================================
+# STATE
+# ================================
+prices = {}
+tick_confirm = {}
+active_signal = {"pair": None, "expiry_time": None}
 
-    # detect choppy market
-    if abs(trend) < 0.08 and volatility < 0.7:
-        return None, None, None, "NO_TRADE"
+last_candle_time = None
+pending_signal = None
+signal_sent_this_candle = False
 
-    # direction logic
-    if trend > 0:
-        direction = "CALL"
-    else:
-        direction = "PUT"
+# ================================
+# EMA FUNCTION
+# ================================
+def ema(data, period):
+    if len(data) < period:
+        return None
 
-    # duration logic (more stable)
-    if volatility > 1.3:
-        duration = "1 min"
-    elif volatility > 0.9:
-        duration = "2 min"
-    else:
-        duration = "3 min"
+    k = 2/(period+1)
+    value = data[0]
 
-    # confidence (REALISTIC RANGE)
-    confidence = int(60 + min(abs(trend)*100, 20))
+    for price in data:
+        value = price*k + value*(1-k)
 
-    # extra safety filter
-    if confidence < 62:
-        return None, None, None, "NO_TRADE"
+    return value
 
-    return direction, duration, confidence, "TRADE"
+# ================================
+# TREND STRENGTH (REAL)
+# ================================
+def trend_strength(price_list):
 
-# -------------------
-# START
-# -------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(price_list) < 150:
+        return 0
 
-    keyboard = [[InlineKeyboardButton(p, callback_data=p)] for p in PAIRS]
+    ema_fast = ema(price_list[-50:], 10)
+    ema_slow = ema(price_list[-100:], 20)
 
-    await update.message.reply_text(
-        "📊 Select OTC Pair:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    if ema_fast is None or ema_slow is None:
+        return 0
 
-# -------------------
-# BUTTON HANDLER
-# -------------------
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    separation = abs(ema_fast - ema_slow)
+    volatility = np.std(price_list[-100:])
 
-    query = update.callback_query
-    await query.answer()
+    if volatility == 0:
+        return 0
 
-    data = query.data
+    strength = (separation / volatility) * 100
 
-    # SELECT PAIR
-    if data in PAIRS:
-        user_state[query.from_user.id] = {"pair": data}
+    return min(strength, 100)
 
-        keyboard = [[InlineKeyboardButton(tf, callback_data=tf)] for tf in TIMEFRAMES]
+# ================================
+# TREND DETECTION (REAL, NO FAKE BOOST)
+# ================================
+def detect_trend(price_list):
 
-        await query.edit_message_text(
-            f"Pair: {data}\n\n⏱ Select Timeframe:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    if len(price_list) < 300:
+        return 0, 0, None
+
+    ema_fast = ema(price_list[-50:], 10)
+    ema_slow = ema(price_list[-100:], 20)
+
+    ema_long_fast = ema(price_list[-200:], 30)
+    ema_long_slow = ema(price_list[-300:], 60)
+
+    if None in (ema_fast, ema_slow, ema_long_fast, ema_long_slow):
+        return 0, 0, None
+
+    strength = trend_strength(price_list)
+
+    # REAL score (not forced)
+    score = (strength * 0.6)
+
+    direction = None
+
+    if ema_fast > ema_slow and ema_long_fast > ema_long_slow:
+        direction = "BUY"
+    elif ema_fast < ema_slow and ema_long_fast < ema_long_slow:
+        direction = "SELL"
+
+    return score, strength, direction
+
+# ================================
+# SIGNAL LOCK
+# ================================
+def signal_active():
+    if active_signal["expiry_time"] is None:
+        return False
+
+    return datetime.now(TIMEZONE) < active_signal["expiry_time"]
+
+def register_signal(pair):
+    now = datetime.now(TIMEZONE)
+
+    total_lock_minutes = ENTRY_DELAY + (MG_STEP * MAX_MG_STEPS) + EXPIRY_MINUTES
+
+    active_signal["pair"] = pair
+    active_signal["expiry_time"] = now + timedelta(minutes=total_lock_minutes)
+
+# ================================
+# SEND SIGNAL
+# ================================
+def send_signal(pair, direction, score, strength):
+
+    if signal_active():
         return
 
-    # SELECT TIMEFRAME → ANALYZE
-    if data in TIMEFRAMES:
+    now = datetime.now(TIMEZONE)
+    entry_time = now + timedelta(minutes=ENTRY_DELAY)
 
-        await query.edit_message_text("⏳ Analyzing clean setup...")
+    mg_times = [entry_time + timedelta(minutes=MG_STEP*i)
+                for i in range(1, MAX_MG_STEPS+1)]
 
-        await asyncio.sleep(4)
+    register_signal(pair)
 
-        state = user_state.get(query.from_user.id, {})
-        pair = state.get("pair", "Unknown")
+    msg = (
+        f"🚨TRADE NOW!!\n\n"
+        f"{pair} (OTC)\n"
+        f"Expiry: {EXPIRY_MINUTES} min\n"
+        f"Entry: {entry_time.strftime('%H:%M:%S')}\n"
+        f"Direction: {direction}\n\n"
+        f"MG1: {mg_times[0].strftime('%H:%M:%S')}\n"
+        f"MG2: {mg_times[1].strftime('%H:%M:%S')}\n"
+        f"MG3: {mg_times[2].strftime('%H:%M:%S')}\n\n"
+        f"Score: {score:.1f}%\n"
+        f"Strength: {strength:.1f}%"
+    )
 
-        direction, duration, confidence, status = generate_signal()
-
-        now = datetime.now(TIMEZONE).strftime("%H:%M:%S")
-
-        # NO TRADE CONDITION
-        if status == "NO_TRADE":
-            await query.edit_message_text(
-                f"❌ NO TRADE\n\n"
-                f"Pair: {pair}\n"
-                f"Timeframe: {data}\n\n"
-                f"Reason: Market not clean\n"
-                f"Time: {now}"
-            )
-            return
-
-        color = "🟢 CALL" if direction == "CALL" else "🔴 PUT"
-
-        message = (
-            "📊 BALANCED SIGNAL\n\n"
-            f"Pair: {pair}\n"
-            f"Timeframe: {data}\n\n"
-            f"Direction: {color}\n"
-            f"Duration: {duration}\n\n"
-            f"Confidence: {confidence}%\n\n"
-            f"Time: {now}"
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=10
         )
+    except:
+        logging.info("Telegram error")
 
-        await query.edit_message_text(message)
+# ================================
+# LOAD SYMBOLS
+# ================================
+async def load_symbols():
+    try:
+        async with websockets.connect(DERIV_WS) as ws:
+            await ws.send(json.dumps({"active_symbols": "brief"}))
+            response = json.loads(await ws.recv())
 
-# -------------------
-# MAIN
-# -------------------
-async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+            return [
+                s["symbol"]
+                for s in response.get("active_symbols", [])
+                if s["symbol"].startswith("frx")
+                and s["symbol"] not in BLOCKED_PAIRS
+            ]
+    except:
+        return []
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_buttons))
+# ================================
+# MAIN LOOP
+# ================================
+async def monitor():
 
-    print("BALANCED BOT RUNNING...")
-    await app.run_polling()
+    global last_candle_time, pending_signal, signal_sent_this_candle
 
-# -------------------
-# RUN
-# -------------------
-if __name__ == "__main__":
-    import nest_asyncio
-    nest_asyncio.apply()
-    asyncio.run(main())
+    while True:
+
+        try:
+            symbols = await load_symbols()
+
+            if not symbols:
+                await asyncio.sleep(5)
+                continue
+
+            for s in symbols:
+                prices[s] = []
+                tick_confirm[s] = {"count": 0, "direction": None}
+
+            print("BOT STARTED")
+
+            async with websockets.connect(DERIV_WS) as ws:
+
+                for s in symbols:
+                    await ws.send(json.dumps({"ticks": s, "subscribe": 1}))
+
+                async for message in ws:
+
+                    data = json.loads(message)
+
+                    if "tick" not in data:
+                        continue
+
+                    pair = data["tick"]["symbol"]
+                    price = data["tick"]["quote"]
+
+                    prices[pair].append(price)
+
+                    if len(prices[pair]) > MAX_PRICES:
+                        prices[pair].pop(0)
+
+                    score, strength, direction = detect_trend(prices[pair])
+
+                    if direction and score >= TREND_SCORE_THRESHOLD and strength >= TREND_STRENGTH_THRESHOLD:
+
+                        if tick_confirm[pair]["direction"] == direction:
+                            tick_confirm[pair]["count"] += 1
+                        else:
+                            tick_confirm[pair] = {"count": 1, "direction": direction}
+
+                        if tick_confirm[pair]["count"] >= TICK_CONFIRMATION:
+                            pending_signal = (pair, direction, score, strength)
+
+                    else:
+                        tick_confirm[pair] = {"count": 0, "direction": None}
+
+                    now = datetime.now(TIMEZONE)
+
+                    candle_time = now.replace(second=0, microsecond=0)
+                    minute = candle_time.minute - (candle_time.minute % 3)
+                    candle_time = candle_time.replace(minute=minute)
+
+                    if last_candle_time is None:
+                        last_candle_time = candle_time
+
+                    if candle_time > last_candle_time:
+                        last_candle_time = candle_time
+                        signal_sent_this_candle = False
+
+                    if pending_signal and not signal_active() and not signal_sent_this_candle:
+
+                        if now.second >= 15:
+
+                            pair_check, dir_check, score_check, strength_check = pending_signal
+
+                            score2, strength2, direction2 = detect_trend(prices[pair_check])
+
+                            if (
+                                direction2 == dir_check
+                                and score2 >= TREND_SCORE_THRESHOLD
+                                and strength2 >= TREND_STRENGTH_THRESHOLD
+                                and tick_confirm[pair_check]["count"] >= TICK_CONFIRMATION
+                            ):
+                                send_signal(pair_check, dir_check, score2, strength2)
+                                signal_sent_this_candle = True
+
+                            pending_signal = None
+
+        except:
+            logging.info("Reconnecting...")
+            await asyncio.sleep(RETRY_SECONDS)
+
+# ================================
+# START
+# ================================
+asyncio.run(monitor())
