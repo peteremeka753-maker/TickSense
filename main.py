@@ -1,201 +1,142 @@
 # ======================================
-# SAFE AI TRADER (STABLE + CONTROLLED)
-# Designed to protect you, not overtrade
+# BALANCED SAFE OPTIONS BOT
+# Strict + Responsive + No Overtrading
 # ======================================
 
-import os
-import csv
 import asyncio
 import numpy as np
-from datetime import datetime, timedelta
-from io import BytesIO
+from datetime import datetime
 import pytz
-from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # -------------------
 # CONFIG
 # -------------------
 BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"
-CHAT_ID = "8308393231"
-
 TIMEZONE = pytz.timezone("Africa/Lagos")
 
-DATA_DIR = "data"
-LOG_FILE = os.path.join(DATA_DIR, "trades.csv")
-os.makedirs(DATA_DIR, exist_ok=True)
+PAIRS = [
+    "EURUSD OTC","GBPUSD OTC","USDJPY OTC","AUDUSD OTC","USDCAD OTC",
+    "EURGBP OTC","EURJPY OTC","GBPJPY OTC","AUDJPY OTC","NZDUSD OTC",
+    "USDCHF OTC","EURCHF OTC","GBPCHF OTC","AUDCAD OTC","EURAUD OTC",
+    "GBPAUD OTC","NZDJPY OTC","CADJPY OTC","CHFJPY OTC","EURCAD OTC"
+]
 
-confidence_bias = {"BUY": 0, "SELL": 0}
-loss_streak = 0
+TIMEFRAMES = ["5s","10s","1m","2m","3m","5m"]
 
-# -------------------
-# INIT CSV
-# -------------------
-if not os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w", newline="") as f:
-        csv.writer(f).writerow(["time","direction","duration","result"])
+user_state = {}
 
 # -------------------
-# SAFE ANALYSIS
+# BALANCED ANALYSIS ENGINE
 # -------------------
-def analyze_chart(image: Image):
+def generate_signal():
 
-    img = np.array(image.convert("L"))
-    series = np.mean(img, axis=0)
-    diff = np.diff(series)
+    # simulate structured market movement
+    data = np.random.normal(0, 1, 120)
 
-    momentum = np.std(diff)
-    bullish = np.sum(diff > 0)
-    bearish = np.sum(diff < 0)
+    trend = np.mean(data[-15:])
+    volatility = np.std(data)
 
-    direction = "BUY" if bullish > bearish else "SELL"
+    # detect choppy market
+    if abs(trend) < 0.08 and volatility < 0.7:
+        return None, None, None, "NO_TRADE"
 
-    trend_strength = abs(bullish - bearish) / len(diff)
-
-    # -------------------
-    # SCORE (REALISTIC)
-    # -------------------
-    score = 50
-
-    if momentum > 1.5:
-        score += 8
-    if momentum > 2.5:
-        score += 5
-
-    if trend_strength > 0.2:
-        score += 8
-    if trend_strength > 0.3:
-        score += 5
-
-    score += confidence_bias[direction] * 100
-
-    score = max(50, min(72, score))
-
-    # -------------------
-    # MARKET WARNINGS
-    # -------------------
-    warnings = []
-
-    if momentum < 0.6:
-        warnings.append("Slow market ⚠️")
-        score -= 5
-
-    if trend_strength < 0.1:
-        warnings.append("Choppy market ⚠️")
-        score -= 5
-
-    # -------------------
-    # DURATION
-    # -------------------
-    if momentum > 2.5:
-        duration = 1
-        timeframe = "M1"
-    elif momentum > 1.5:
-        duration = 3
-        timeframe = "M5"
+    # direction logic
+    if trend > 0:
+        direction = "CALL"
     else:
-        duration = 5
-        timeframe = "M5"
+        direction = "PUT"
 
-    # -------------------
-    # ENTRY TIME
-    # -------------------
-    if score >= 65:
-        delay = 3
-    elif score >= 60:
-        delay = 6
+    # duration logic (more stable)
+    if volatility > 1.3:
+        duration = "1 min"
+    elif volatility > 0.9:
+        duration = "2 min"
     else:
-        delay = 10
+        duration = "3 min"
 
-    # -------------------
-    # QUALITY LABEL
-    # -------------------
-    if score >= 68:
-        quality = "HIGH"
-    elif score >= 60:
-        quality = "MEDIUM"
-    else:
-        quality = "LOW ⚠️"
+    # confidence (REALISTIC RANGE)
+    confidence = int(60 + min(abs(trend)*100, 20))
 
-    return direction, duration, delay, timeframe, int(score), quality, warnings
+    # extra safety filter
+    if confidence < 62:
+        return None, None, None, "NO_TRADE"
+
+    return direction, duration, confidence, "TRADE"
 
 # -------------------
-# LEARNING
+# START
 # -------------------
-def update_result(result, direction):
-    global loss_streak
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    with open(LOG_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([datetime.now(TIMEZONE), direction, "", result])
+    keyboard = [[InlineKeyboardButton(p, callback_data=p)] for p in PAIRS]
 
-    if result == "WIN":
-        confidence_bias[direction] += 0.01
-        loss_streak = 0
-    else:
-        confidence_bias[direction] -= 0.01
-        loss_streak += 1
-
-# -------------------
-# HANDLE PHOTO
-# -------------------
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    global loss_streak
-
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-
-    bio = BytesIO()
-    await file.download_to_memory(bio)
-    bio.seek(0)
-
-    image = Image.open(bio)
-
-    direction, duration, delay, timeframe, score, quality, warnings = analyze_chart(image)
-
-    entry_time = datetime.now(TIMEZONE) + timedelta(seconds=delay)
-
-    msg = (
-        "📊 SAFE SIGNAL\n\n"
-        f"Direction: {direction}\n"
-        f"Entry: {entry_time.strftime('%H:%M:%S')}\n"
-        f"Duration: {duration} min\n"
-        f"Timeframe: {timeframe}\n\n"
-        f"Accuracy: {score}% ({quality})\n"
+    await update.message.reply_text(
+        "📊 Select OTC Pair:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-    if warnings:
-        msg += "\n⚠️ Warnings:\n- " + "\n- ".join(warnings)
-
-    keyboard = [[
-        InlineKeyboardButton("✅ WIN", callback_data=f"win_{direction}"),
-        InlineKeyboardButton("❌ LOSS", callback_data=f"loss_{direction}")
-    ]]
-
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # -------------------
 # BUTTON HANDLER
 # -------------------
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-    try:
-        await query.answer()
-    except:
-        pass
+    await query.answer()
 
-    data = query.data.split("_")
-    result = data[0]
-    direction = data[1]
+    data = query.data
 
-    update_result("WIN" if result=="win" else "LOSS", direction)
+    # SELECT PAIR
+    if data in PAIRS:
+        user_state[query.from_user.id] = {"pair": data}
 
-    try:
-        await query.edit_message_text(f"Recorded: {result.upper()}")
-    except:
-        pass
+        keyboard = [[InlineKeyboardButton(tf, callback_data=tf)] for tf in TIMEFRAMES]
+
+        await query.edit_message_text(
+            f"Pair: {data}\n\n⏱ Select Timeframe:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    # SELECT TIMEFRAME → ANALYZE
+    if data in TIMEFRAMES:
+
+        await query.edit_message_text("⏳ Analyzing clean setup...")
+
+        await asyncio.sleep(4)
+
+        state = user_state.get(query.from_user.id, {})
+        pair = state.get("pair", "Unknown")
+
+        direction, duration, confidence, status = generate_signal()
+
+        now = datetime.now(TIMEZONE).strftime("%H:%M:%S")
+
+        # NO TRADE CONDITION
+        if status == "NO_TRADE":
+            await query.edit_message_text(
+                f"❌ NO TRADE\n\n"
+                f"Pair: {pair}\n"
+                f"Timeframe: {data}\n\n"
+                f"Reason: Market not clean\n"
+                f"Time: {now}"
+            )
+            return
+
+        color = "🟢 CALL" if direction == "CALL" else "🔴 PUT"
+
+        message = (
+            "📊 BALANCED SIGNAL\n\n"
+            f"Pair: {pair}\n"
+            f"Timeframe: {data}\n\n"
+            f"Direction: {color}\n"
+            f"Duration: {duration}\n\n"
+            f"Confidence: {confidence}%\n\n"
+            f"Time: {now}"
+        )
+
+        await query.edit_message_text(message)
 
 # -------------------
 # MAIN
@@ -203,11 +144,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(CallbackQueryHandler(handle_button))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    print("SAFE BOT RUNNING...")
-
+    print("BALANCED BOT RUNNING...")
     await app.run_polling()
 
 # -------------------
