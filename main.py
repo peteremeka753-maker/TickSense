@@ -18,7 +18,7 @@ DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 
 TREND_SCORE_THRESHOLD = 92
-TREND_STRENGTH_THRESHOLD = 60  # reduced to allow real filtering
+TREND_STRENGTH_THRESHOLD = 60
 
 ENTRY_DELAY = 2
 MG_STEP = 2
@@ -28,7 +28,7 @@ EXPIRY_MINUTES = 2
 MAX_PRICES = 700
 RETRY_SECONDS = 5
 
-TICK_CONFIRMATION = 6  # stronger confirmation
+TICK_CONFIRMATION = 6
 
 BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
@@ -41,9 +41,6 @@ signal_sent_this_candle = False
 last_signal_time = None
 
 
-# ================================
-# EMA
-# ================================
 def ema(data, period):
     if len(data) < period:
         return None
@@ -54,9 +51,6 @@ def ema(data, period):
     return value
 
 
-# ================================
-# RANGE FILTER
-# ================================
 def is_ranging(price_list):
     if len(price_list) < 120:
         return True
@@ -64,9 +58,6 @@ def is_ranging(price_list):
     return (max(recent) - min(recent)) < (np.std(recent) * 2)
 
 
-# ================================
-# TREND STRENGTH (REAL)
-# ================================
 def trend_strength(price_list):
     if len(price_list) < 150:
         return 0
@@ -81,9 +72,6 @@ def trend_strength(price_list):
     return (separation/volatility)*100
 
 
-# ================================
-# TREND DETECTION (FILTERED)
-# ================================
 def detect_trend(price_list):
     if len(price_list) < 300:
         return 0,0,None
@@ -99,7 +87,6 @@ def detect_trend(price_list):
     if not all([ema_fast, ema_slow, ema_long_fast, ema_long_slow]):
         return 0,0,None
 
-    # 🔥 BLOCK weak trends
     if abs(ema_fast - ema_slow) < np.std(price_list[-100:]) * 0.5:
         return 0,0,None
 
@@ -115,13 +102,11 @@ def detect_trend(price_list):
     return score,strength,direction
 
 
-# ================================
-# SIGNAL LOCK
-# ================================
 def signal_active():
     if active_signal["expiry_time"] is None:
         return False
     return datetime.now(TIMEZONE) < active_signal["expiry_time"]
+
 
 def register_signal(pair):
     total = ENTRY_DELAY + (MG_STEP*MAX_MG_STEPS) + EXPIRY_MINUTES
@@ -129,16 +114,12 @@ def register_signal(pair):
     active_signal["expiry_time"]= datetime.now(TIMEZONE)+timedelta(minutes=total)
 
 
-# ================================
-# SEND SIGNAL
-# ================================
 def send_signal(pair,direction,score,strength):
     global last_signal_time
 
     if signal_active():
         return
 
-    # 🔥 cooldown (anti losing streak)
     if last_signal_time:
         if (datetime.now(TIMEZONE) - last_signal_time).seconds < 120:
             return
@@ -171,9 +152,6 @@ STRENGTH: {strength:.0f}%
         pass
 
 
-# ================================
-# LOAD SYMBOLS
-# ================================
 async def load_otc_symbols():
     try:
         async with websockets.connect(DERIV_WS) as ws:
@@ -189,9 +167,6 @@ async def load_otc_symbols():
         return []
 
 
-# ================================
-# MAIN LOOP
-# ================================
 async def monitor():
     global last_candle_time,pending_signal,signal_sent_this_candle
 
@@ -245,7 +220,25 @@ async def monitor():
 
                         if pending_signal and not signal_active() and not signal_sent_this_candle:
 
-                            seconds=now.second
+                            seconds = now.second
 
-                            # 🔥 tighter entry window
-                            if 10 <= seco
+                            # 🔥 fixed line
+                            if 10 <= seconds <= 20:
+
+                                p,d,sc,st=pending_signal
+                                score2,strength2,dir2=detect_trend(prices[p])
+
+                                if dir2==d and score2>=TREND_SCORE_THRESHOLD:
+                                    send_signal(p,d,score2,strength2)
+                                    signal_sent_this_candle=True
+
+                                pending_signal=None
+
+                    except:
+                        continue
+
+        except:
+            await asyncio.sleep(RETRY_SECONDS)
+
+
+asyncio.run(monitor())
