@@ -1,13 +1,12 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
-# PRICE ACTION VERSION (NO EMA)
+# PRICE ACTION VERSION + STABILITY LAYER
 # ======================================
 
 import asyncio
 import json
 import requests
 import websockets
-import logging
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
@@ -32,9 +31,6 @@ EXPIRY_MINUTES = 2
 MAX_PRICES = 700
 TICK_CONFIRMATION = 3
 
-TREND_SCORE_THRESHOLD = 90
-TREND_STRENGTH_THRESHOLD = 90
-
 BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
 # ================================
@@ -43,6 +39,35 @@ BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 prices = {}
 tick_confirm = {}
 active_signal = {"pair": None, "expiry_time": None}
+
+# ================================
+# STABILITY / RISK ENGINE (NEW)
+# ================================
+bad_market_counter = 0
+PAUSE_THRESHOLD = 10
+PAUSED = False
+
+def risk_engine(direction):
+    """
+    Detect unstable / choppy market conditions
+    instead of guessing win/loss.
+    """
+
+    global bad_market_counter, PAUSED
+
+    if direction is None:
+        bad_market_counter += 1
+    else:
+        bad_market_counter = max(0, bad_market_counter - 1)
+
+    if bad_market_counter >= PAUSE_THRESHOLD:
+        PAUSED = True
+
+    if PAUSED and bad_market_counter <= 3:
+        PAUSED = False
+
+    return PAUSED
+
 
 # ================================
 # PRICE ACTION CORE
@@ -126,22 +151,10 @@ def register_signal(pair):
 
 
 # ================================
-# FLAGS
-# ================================
-def get_flag(code):
-    flags = {
-        "USD":"🇺🇸","EUR":"🇪🇺","GBP":"🇬🇧",
-        "CHF":"🇨🇭","JPY":"🇯🇵","AUD":"🇦🇺",
-        "CAD":"🇨🇦","NZD":"🇳🇿"
-    }
-    return flags.get(code.upper(), "")
-
-
-# ================================
-# TELEGRAM SEND
+# TELEGRAM
 # ================================
 def send_signal(pair, direction, score):
-    if signal_active():
+    if signal_active() or PAUSED:
         return
 
     now = datetime.now(TIMEZONE)
@@ -154,38 +167,28 @@ def send_signal(pair, direction, score):
 
     register_signal(pair)
 
-    base = pair[3:6].upper()
-    quote = pair[6:9].upper()
-
     msg = (
         f"🚨 TRADE SIGNAL (PRICE ACTION)\n\n"
-        f"📉 {get_flag(base)} {base}/{quote} {get_flag(quote)} (OTC)\n"
-        f"⏰ Expiry: {EXPIRY_MINUTES} min\n"
-        f"📍 Entry: {entry_time.strftime('%I:%M %p')}\n"
-        f"📈 Direction: {direction}\n\n"
-        f"🎯 Martingale:\n"
-        f"🔁 L1 → {mg_times[0].strftime('%I:%M %p')}\n"
-        f"🔁 L2 → {mg_times[1].strftime('%I:%M %p')}\n"
-        f"🔁 L3 → {mg_times[2].strftime('%I:%M %p')}\n\n"
-        f"Confidence: {score}%"
+        f"PAIR: {pair}\n"
+        f"DIRECTION: {direction}\n"
+        f"ENTRY: {entry_time.strftime('%I:%M %p')}\n"
+        f"EXPIRY: {EXPIRY_MINUTES} min\n"
+        f"CONFIDENCE: {score}%\n\n"
+        f"{'PAUSED MODE ACTIVE' if PAUSED else 'ACTIVE MODE'}"
     )
 
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=10
-        )
-    except:
-        pass
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": msg}
+    )
 
 
 # ================================
-# SYMBOLS
+# SYMBOL LOADING (STABLE)
 # ================================
 async def load_symbols():
     try:
-        async with websockets.connect(DERIV_WS) as ws:
+        async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
             await ws.send(json.dumps({"active_symbols":"brief"}))
             data = json.loads(await ws.recv())
 
@@ -203,6 +206,8 @@ async def load_symbols():
 # MAIN LOOP
 # ================================
 async def monitor():
+    global PAUSED
+
     while True:
         symbols = await load_symbols()
 
@@ -214,53 +219,56 @@ async def monitor():
             prices[s] = []
             tick_confirm[s] = {"count": 0, "direction": None}
 
-        print("BOT STARTED (PRICE ACTION MODE)")
+        print("BOT STARTED (STABLE PRICE ACTION MODE)")
 
-        async with websockets.connect(DERIV_WS) as ws:
-            for s in symbols:
-                await ws.send(json.dumps({"ticks": s, "subscribe": 1}))
+        try:
+            async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
 
-            async for msg in ws:
-                data = json.loads(msg)
+                for s in symbols:
+                    await ws.send(json.dumps({"ticks": s, "subscribe": 1}))
 
-                if "tick" not in data:
-                    continue
+                async for msg in ws:
+                    data = json.loads(msg)
 
-                pair = data["tick"]["symbol"]
-                price = float(data["tick"]["quote"])
+                    if "tick" not in data:
+                        continue
 
-                prices[pair].append(price)
+                    pair = data["tick"]["symbol"]
+                    price = float(data["tick"]["quote"])
 
-                if len(prices[pair]) > MAX_PRICES:
-                    prices[pair].pop(0)
+                    prices[pair].append(price)
 
-                # ================================
-                # PRICE ACTION ANALYSIS
-                # ================================
-                direction = market_bias(prices[pair])
+                    if len(prices[pair]) > MAX_PRICES:
+                        prices[pair].pop(0)
 
-                if not direction:
-                    direction = rejection_signal(prices[pair])
+                    direction = market_bias(prices[pair])
 
-                if not direction:
-                    continue
+                    if not direction:
+                        direction = rejection_signal(prices[pair])
 
-                # confirmation system
-                if tick_confirm[pair]["direction"] == direction:
-                    tick_confirm[pair]["count"] += 1
-                else:
-                    tick_confirm[pair]["direction"] = direction
-                    tick_confirm[pair]["count"] = 1
+                    # ================================
+                    # RISK ENGINE (NEW)
+                    # ================================
+                    PAUSED = risk_engine(direction)
 
-                # send signal
-                if tick_confirm[pair]["count"] >= TICK_CONFIRMATION:
-                    score = 92
-                    send_signal(pair, direction, score)
-                    tick_confirm[pair] = {"count": 0, "direction": None}
+                    if not direction or PAUSED:
+                        continue
+
+                    if tick_confirm[pair]["direction"] == direction:
+                        tick_confirm[pair]["count"] += 1
+                    else:
+                        tick_confirm[pair]["direction"] = direction
+                        tick_confirm[pair]["count"] = 1
+
+                    if tick_confirm[pair]["count"] >= TICK_CONFIRMATION:
+                        send_signal(pair, direction, 92)
+                        tick_confirm[pair] = {"count": 0, "direction": None}
+
+        except Exception:
+            await asyncio.sleep(3)
 
 
 # ================================
-# START BOT
+# START
 # ================================
-if __name__ == "__main__":
-    asyncio.run(monitor())
+if __name__ == "__mai
