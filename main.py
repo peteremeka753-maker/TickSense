@@ -7,7 +7,6 @@ import asyncio
 import json
 import requests
 import websockets
-import numpy as np
 from datetime import datetime, timedelta
 import pytz
 
@@ -29,7 +28,7 @@ MAX_MG_STEPS = 3
 EXPIRY_MINUTES = 2
 
 MAX_PRICES = 700
-TICK_CONFIRMATION = 3
+TICK_CONFIRMATION = 2  # reduced slightly to avoid over-filtering
 
 BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
@@ -41,91 +40,57 @@ tick_confirm = {}
 active_signal = {"pair": None, "expiry_time": None}
 
 # ================================
-# STABILITY / RISK ENGINE
+# SIMPLE RISK FILTER (LIGHT)
 # ================================
-bad_market_counter = 0
-PAUSE_THRESHOLD = 10
-PAUSED = False
+paused = False
+bad_count = 0
+PAUSE_LIMIT = 12
 
 
 def risk_engine(direction):
-    global bad_market_counter, PAUSED
+    global paused, bad_count
 
     if direction is None:
-        bad_market_counter += 1
+        bad_count += 1
     else:
-        bad_market_counter = max(0, bad_market_counter - 1)
+        bad_count = max(0, bad_count - 1)
 
-    if bad_market_counter >= PAUSE_THRESHOLD:
-        PAUSED = True
+    if bad_count >= PAUSE_LIMIT:
+        paused = True
 
-    if PAUSED and bad_market_counter <= 3:
-        PAUSED = False
+    if paused and bad_count <= 4:
+        paused = False
 
-    return PAUSED
+    return paused
 
 
 # ================================
 # PRICE ACTION CORE
 # ================================
-def swing_highs_lows(prices, lookback=8):
-    highs = []
-    lows = []
-
-    for i in range(lookback, len(prices) - lookback):
-        window = prices[i - lookback:i + lookback]
-
-        if prices[i] == max(window):
-            highs.append((i, prices[i]))
-
-        if prices[i] == min(window):
-            lows.append((i, prices[i]))
-
-    return highs, lows
-
-
 def market_bias(price_list):
-    if len(price_list) < 60:
+    if len(price_list) < 40:
         return None
 
-    highs, lows = swing_highs_lows(price_list[-200:], 8)
+    last = price_list[-1]
+    prev = price_list[-5]
 
-    if len(highs) < 2 or len(lows) < 2:
-        return None
-
-    last_high = highs[-1][1]
-    prev_high = highs[-2][1]
-    last_low = lows[-1][1]
-    prev_low = lows[-2][1]
-
-    if last_high > prev_high and last_low > prev_low:
+    if last > prev:
         return "BUY"
-
-    if last_high < prev_high and last_low < prev_low:
+    if last < prev:
         return "SELL"
 
     return None
 
 
 def rejection_signal(price_list):
-    if len(price_list) < 10:
+    if len(price_list) < 5:
         return None
 
-    last = price_list[-1]
-    prev = price_list[-2]
-    prev2 = price_list[-3]
+    if price_list[-1] > price_list[-2] and price_list[-2] < price_list[-3]:
+        return "BUY"
 
-    body = abs(prev - prev2)
-    wick = abs(last - prev)
-
-    if body == 0:
-        return None
-
-    if wick > body * 1.5:
-        if last < prev:
-            return "BUY"
-        if last > prev:
-            return "SELL"
+    if price_list[-1] < price_list[-2] and price_list[-2] > price_list[-3]:
+        return "SELL"
 
     return None
 
@@ -150,15 +115,15 @@ def register_signal(pair):
 # TELEGRAM SIGNAL
 # ================================
 def send_signal(pair, direction, score):
-    if signal_active() or PAUSED:
+    if signal_active() or paused:
         return
 
     now = datetime.now(TIMEZONE)
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
 
-    level1 = entry_time
-    level2 = entry_time + timedelta(minutes=MG_STEP)
-    level3 = entry_time + timedelta(minutes=MG_STEP * 2)
+    l1 = entry_time
+    l2 = entry_time + timedelta(minutes=MG_STEP)
+    l3 = entry_time + timedelta(minutes=MG_STEP * 2)
 
     register_signal(pair)
 
@@ -166,13 +131,14 @@ def send_signal(pair, direction, score):
         f"🚨 TRADE SIGNAL (PRICE ACTION)\n\n"
         f"PAIR: {pair}\n"
         f"DIRECTION: {direction}\n\n"
-        f"ENTRY TIME: {entry_time.strftime('%I:%M %p')}\n\n"
+        f"ENTRY: {entry_time.strftime('%I:%M %p')}\n"
+        f"EXPIRY: {EXPIRY_MINUTES} min\n\n"
         f"📊 MARTINGALE LEVELS\n"
-        f"🔹 Level 1 → {level1.strftime('%I:%M %p')}\n"
-        f"🔹 Level 2 → {level2.strftime('%I:%M %p')}\n"
-        f"🔹 Level 3 → {level3.strftime('%I:%M %p')}\n\n"
+        f"🔹 L1 → {l1.strftime('%I:%M %p')}\n"
+        f"🔹 L2 → {l2.strftime('%I:%M %p')}\n"
+        f"🔹 L3 → {l3.strftime('%I:%M %p')}\n\n"
         f"CONFIDENCE: {score}%\n"
-        f"{'PAUSED MODE ACTIVE' if PAUSED else 'ACTIVE MODE'}"
+        f"{'PAUSED' if paused else 'ACTIVE'}"
     )
 
     try:
@@ -208,7 +174,7 @@ async def load_symbols():
 # MAIN LOOP
 # ================================
 async def monitor():
-    global PAUSED
+    global paused
 
     while True:
         symbols = await load_symbols()
@@ -221,7 +187,7 @@ async def monitor():
             prices[s] = []
             tick_confirm[s] = {"count": 0, "direction": None}
 
-        print("BOT STARTED (STABLE PRICE ACTION MODE)")
+        print("BOT STARTED (CLEAN PRICE ACTION MODE)")
 
         try:
             async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
@@ -248,9 +214,9 @@ async def monitor():
                     if not direction:
                         direction = rejection_signal(prices[pair])
 
-                    PAUSED = risk_engine(direction)
+                    paused = risk_engine(direction)
 
-                    if not direction or PAUSED:
+                    if not direction or paused:
                         continue
 
                     if tick_confirm[pair]["direction"] == direction:
@@ -260,7 +226,7 @@ async def monitor():
                         tick_confirm[pair]["count"] = 1
 
                     if tick_confirm[pair]["count"] >= TICK_CONFIRMATION:
-                        send_signal(pair, direction, 92)
+                        send_signal(pair, direction, 90)
                         tick_confirm[pair] = {"count": 0, "direction": None}
 
         except Exception:
