@@ -1,6 +1,6 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
-# FINAL VERSION (PRICE ACTION + CONTROL)
+# FINAL SNIPER + STABILITY VERSION
 # ======================================
 
 import asyncio
@@ -12,13 +12,13 @@ from datetime import datetime, timedelta
 import pytz
 
 # ================================
-# TELEGRAM SETTINGS
+# TELEGRAM
 # ================================
 BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"
 CHAT_ID = "8308393231"
 
 # ================================
-# GENERAL SETTINGS
+# SETTINGS
 # ================================
 DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
@@ -29,7 +29,7 @@ MAX_MG_STEPS = 3
 EXPIRY_MINUTES = 2
 
 MAX_PRICES = 700
-TICK_CONFIRMATION = 3
+TICK_CONFIRMATION = 4
 
 BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
@@ -42,85 +42,111 @@ active_signal = {"pair": None, "expiry_time": None}
 COOLDOWN = False
 
 # ================================
-# PRICE ACTION
+# SESSION FILTER
 # ================================
-def swing_highs_lows(prices, lookback=8):
-    highs, lows = [], []
-    for i in range(lookback, len(prices)-lookback):
-        window = prices[i-lookback:i+lookback]
-        if prices[i] == max(window):
-            highs.append(prices[i])
-        if prices[i] == min(window):
-            lows.append(prices[i])
-    return highs, lows
+def valid_session():
+    hour = datetime.now(TIMEZONE).hour
+    return 8 <= hour <= 22
 
+# ================================
+# VOLATILITY
+# ================================
+def good_volatility(price_list):
+    if len(price_list) < 50:
+        return False
+    return np.std(price_list[-50:]) > 0.0003
 
-def market_bias(price_list):
-    if len(price_list) < 60:
+# ================================
+# STABILITY FILTER (CROSS-BROKER)
+# ================================
+def stable_market(price_list):
+    if len(price_list) < 20:
+        return False
+
+    recent = price_list[-20:]
+    moves = [abs(recent[i] - recent[i-1]) for i in range(1, len(recent))]
+
+    avg_move = np.mean(moves)
+    max_move = max(moves)
+
+    if max_move > avg_move * 3:
+        return False
+
+    if avg_move < 0.00005:
+        return False
+
+    return True
+
+# ================================
+# STRONG MOVE
+# ================================
+def strong_movement(price_list):
+    if len(price_list) < 20:
+        return False
+
+    move = abs(price_list[-1] - price_list[-5])
+    volatility = np.std(price_list[-20:])
+
+    return move > volatility * 1.2
+
+# ================================
+# BREAKOUT
+# ================================
+def breakout(price_list):
+    if len(price_list) < 30:
         return None
 
-    highs, lows = swing_highs_lows(price_list[-200:], 8)
+    recent = price_list[-20:]
+    high = max(recent[:-1])
+    low = min(recent[:-1])
+    last = recent[-1]
 
-    if len(highs) < 2 or len(lows) < 2:
-        return None
-
-    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+    if last > high:
         return "BUY"
-
-    if highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+    if last < low:
         return "SELL"
 
     return None
 
+# ================================
+# PULLBACK CONFIRMATION
+# ================================
+def pullback_confirm(price_list, direction):
+    if len(price_list) < 5:
+        return False
 
-def rejection_signal(price_list):
-    if len(price_list) < 10:
-        return None
+    if direction == "BUY":
+        return price_list[-1] > price_list[-2]
 
-    last, prev, prev2 = price_list[-1], price_list[-2], price_list[-3]
+    if direction == "SELL":
+        return price_list[-1] < price_list[-2]
 
-    body = abs(prev - prev2)
-    wick = abs(last - prev)
-
-    if body == 0:
-        return None
-
-    if wick > body * 1.5:
-        if last < prev:
-            return "BUY"
-        elif last > prev:
-            return "SELL"
-
-    return None
+    return False
 
 # ================================
-# SIGNAL LOCK (COOLDOWN SYSTEM)
+# SIGNAL LOCK
 # ================================
 def signal_active():
     if active_signal["expiry_time"] is None:
         return False
     return datetime.now(TIMEZONE) < active_signal["expiry_time"]
 
-
 def register_signal(pair):
     global COOLDOWN
-    now = datetime.now(TIMEZONE)
 
+    now = datetime.now(TIMEZONE)
     total = ENTRY_DELAY + (MG_STEP * MAX_MG_STEPS) + EXPIRY_MINUTES
 
     active_signal["pair"] = pair
     active_signal["expiry_time"] = now + timedelta(minutes=total)
 
-    # 🔥 STOP SCANNING
     COOLDOWN = True
 
-
 # ================================
-# TELEGRAM SIGNAL
+# SEND SIGNAL
 # ================================
 def send_signal(pair, direction):
     now = datetime.now(TIMEZONE)
-
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
 
     mg_times = [
@@ -142,19 +168,21 @@ def send_signal(pair, direction):
         f"🔹 L3 → {mg_times[2].strftime('%I:%M %p')}"
     )
 
-    requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": msg},
-        timeout=10
-    )
-
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=10
+        )
+    except:
+        pass
 
 # ================================
 # LOAD SYMBOLS
 # ================================
 async def load_symbols():
     try:
-        async with websockets.connect(DERIV_WS) as ws:
+        async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
             await ws.send(json.dumps({"active_symbols": "brief"}))
             data = json.loads(await ws.recv())
 
@@ -167,7 +195,6 @@ async def load_symbols():
     except:
         return []
 
-
 # ================================
 # MAIN LOOP
 # ================================
@@ -175,29 +202,33 @@ async def monitor():
     global COOLDOWN
 
     while True:
-        # 🔥 WAIT until signal finishes
-        if COOLDOWN and not signal_active():
-            COOLDOWN = False
-            print("COOLDOWN FINISHED → RESUMING SCAN")
-
-        if COOLDOWN:
-            await asyncio.sleep(1)
-            continue
-
-        symbols = await load_symbols()
-
-        if not symbols:
-            await asyncio.sleep(5)
-            continue
-
-        for s in symbols:
-            prices[s] = []
-            tick_confirm[s] = {"count": 0, "direction": None}
-
-        print("SCANNING MARKET...")
-
         try:
-            async with websockets.connect(DERIV_WS) as ws:
+            # cooldown control
+            if COOLDOWN and not signal_active():
+                COOLDOWN = False
+                print("RESUME SCANNING")
+
+            if COOLDOWN:
+                await asyncio.sleep(1)
+                continue
+
+            if not valid_session():
+                await asyncio.sleep(30)
+                continue
+
+            symbols = await load_symbols()
+
+            if not symbols:
+                await asyncio.sleep(5)
+                continue
+
+            for s in symbols:
+                prices[s] = []
+                tick_confirm[s] = {"count": 0, "direction": None}
+
+            print("SNIPER SCANNING...")
+
+            async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
 
                 for s in symbols:
                     await ws.send(json.dumps({"ticks": s, "subscribe": 1}))
@@ -219,12 +250,21 @@ async def monitor():
                     if len(prices[pair]) > MAX_PRICES:
                         prices[pair].pop(0)
 
-                    direction = market_bias(prices[pair])
+                    if not good_volatility(prices[pair]):
+                        continue
+
+                    if not stable_market(prices[pair]):
+                        continue
+
+                    if not strong_movement(prices[pair]):
+                        continue
+
+                    direction = breakout(prices[pair])
 
                     if not direction:
-                        direction = rejection_signal(prices[pair])
+                        continue
 
-                    if not direction:
+                    if not pullback_confirm(prices[pair], direction):
                         continue
 
                     if tick_confirm[pair]["direction"] == direction:
@@ -235,14 +275,13 @@ async def monitor():
 
                     if tick_confirm[pair]["count"] >= TICK_CONFIRMATION:
                         send_signal(pair, direction)
-                        break  # 🔥 STOP AFTER ONE SIGNAL
+                        break
 
-        except:
+        except Exception:
             await asyncio.sleep(3)
 
-
 # ================================
-# START BOT (FIXED ERROR)
+# START (FIXED ERROR)
 # ================================
 if __name__ == "__main__":
     asyncio.run(monitor())
