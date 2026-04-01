@@ -41,18 +41,14 @@ tick_confirm = {}
 active_signal = {"pair": None, "expiry_time": None}
 
 # ================================
-# STABILITY / RISK ENGINE (NEW)
+# STABILITY / RISK ENGINE
 # ================================
 bad_market_counter = 0
 PAUSE_THRESHOLD = 10
 PAUSED = False
 
-def risk_engine(direction):
-    """
-    Detect unstable / choppy market conditions
-    instead of guessing win/loss.
-    """
 
+def risk_engine(direction):
     global bad_market_counter, PAUSED
 
     if direction is None:
@@ -76,8 +72,8 @@ def swing_highs_lows(prices, lookback=8):
     highs = []
     lows = []
 
-    for i in range(lookback, len(prices)-lookback):
-        window = prices[i-lookback:i+lookback]
+    for i in range(lookback, len(prices) - lookback):
+        window = prices[i - lookback:i + lookback]
 
         if prices[i] == max(window):
             highs.append((i, prices[i]))
@@ -151,7 +147,7 @@ def register_signal(pair):
 
 
 # ================================
-# TELEGRAM
+# TELEGRAM SIGNAL
 # ================================
 def send_signal(pair, direction, score):
     if signal_active() or PAUSED:
@@ -160,36 +156,42 @@ def send_signal(pair, direction, score):
     now = datetime.now(TIMEZONE)
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
 
-    mg_times = [
-        entry_time + timedelta(minutes=MG_STEP*i)
-        for i in range(1, MAX_MG_STEPS+1)
-    ]
+    level1 = entry_time
+    level2 = entry_time + timedelta(minutes=MG_STEP)
+    level3 = entry_time + timedelta(minutes=MG_STEP * 2)
 
     register_signal(pair)
 
     msg = (
         f"🚨 TRADE SIGNAL (PRICE ACTION)\n\n"
         f"PAIR: {pair}\n"
-        f"DIRECTION: {direction}\n"
-        f"ENTRY: {entry_time.strftime('%I:%M %p')}\n"
-        f"EXPIRY: {EXPIRY_MINUTES} min\n"
-        f"CONFIDENCE: {score}%\n\n"
+        f"DIRECTION: {direction}\n\n"
+        f"ENTRY TIME: {entry_time.strftime('%I:%M %p')}\n\n"
+        f"📊 MARTINGALE LEVELS\n"
+        f"🔹 Level 1 → {level1.strftime('%I:%M %p')}\n"
+        f"🔹 Level 2 → {level2.strftime('%I:%M %p')}\n"
+        f"🔹 Level 3 → {level3.strftime('%I:%M %p')}\n\n"
+        f"CONFIDENCE: {score}%\n"
         f"{'PAUSED MODE ACTIVE' if PAUSED else 'ACTIVE MODE'}"
     )
 
-    requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": msg}
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=10
+        )
+    except:
+        pass
 
 
 # ================================
-# SYMBOL LOADING (STABLE)
+# SYMBOL LOADING
 # ================================
 async def load_symbols():
     try:
         async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
-            await ws.send(json.dumps({"active_symbols":"brief"}))
+            await ws.send(json.dumps({"active_symbols": "brief"}))
             data = json.loads(await ws.recv())
 
             return [
@@ -246,9 +248,6 @@ async def monitor():
                     if not direction:
                         direction = rejection_signal(prices[pair])
 
-                    # ================================
-                    # RISK ENGINE (NEW)
-                    # ================================
                     PAUSED = risk_engine(direction)
 
                     if not direction or PAUSED:
@@ -271,4 +270,5 @@ async def monitor():
 # ================================
 # START
 # ================================
-if __name__ == "__mai
+if __name__ == "__main__":
+    asyncio.run(monitor())
