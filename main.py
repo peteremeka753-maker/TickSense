@@ -11,15 +11,9 @@ import numpy as np
 from datetime import datetime, timedelta
 import pytz
 
-# ================================
-# TELEGRAM
-# ================================
-BOT_TOKEN = "8751531182:AAGLr0K3N21LIalG-mgxbiIUjdcJTNghLTg"
-CHAT_ID = "8308393231"
+BOT_TOKEN = "8379555524:AAEPO3_ZQ0aHFpzOLr40hyHig89LxuJS7i4"
+CHAT_ID = "6918721957"
 
-# ================================
-# SETTINGS
-# ================================
 DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 
@@ -33,9 +27,6 @@ TICK_CONFIRMATION = 4
 
 BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
-# ================================
-# STATE
-# ================================
 prices = {}
 tick_confirm = {}
 active_signal = {"pair": None, "expiry_time": None}
@@ -57,7 +48,7 @@ def good_volatility(price_list):
     return np.std(price_list[-50:]) > 0.0003
 
 # ================================
-# STABILITY FILTER (CROSS-BROKER)
+# STABILITY FILTER
 # ================================
 def stable_market(price_list):
     if len(price_list) < 20:
@@ -120,6 +111,28 @@ def pullback_confirm(price_list, direction):
 
     if direction == "SELL":
         return price_list[-1] < price_list[-2]
+
+    return False
+
+# ================================
+# 🔥 NEW: TREND BUILDING (ONLY ADDITION)
+# ================================
+def trend_building(price_list, direction):
+    if len(price_list) < 15:
+        return False
+
+    moves = []
+
+    for i in range(-5, 0):
+        moves.append(price_list[i] - price_list[i-1])
+
+    if direction == "BUY":
+        positives = sum(1 for m in moves if m > 0)
+        return positives >= 3
+
+    if direction == "SELL":
+        negatives = sum(1 for m in moves if m < 0)
+        return negatives >= 3
 
     return False
 
@@ -203,7 +216,6 @@ async def monitor():
 
     while True:
         try:
-            # cooldown control
             if COOLDOWN and not signal_active():
                 COOLDOWN = False
                 print("RESUME SCANNING")
@@ -267,6 +279,10 @@ async def monitor():
                     if not pullback_confirm(prices[pair], direction):
                         continue
 
+                    # 🔥 ONLY NEW LINE ADDED
+                    if not trend_building(prices[pair], direction):
+                        continue
+
                     if tick_confirm[pair]["direction"] == direction:
                         tick_confirm[pair]["count"] += 1
                     else:
@@ -281,7 +297,7 @@ async def monitor():
             await asyncio.sleep(3)
 
 # ================================
-# START (FIXED ERROR)
+# START
 # ================================
 if __name__ == "__main__":
     asyncio.run(monitor())
