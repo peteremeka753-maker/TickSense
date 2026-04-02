@@ -1,6 +1,6 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
-# FINAL SNIPER + STABILITY VERSION (FIXED)
+# CLEAN RESET VERSION (STABLE + NO SPAM)
 # ======================================
 
 import asyncio
@@ -17,34 +17,24 @@ CHAT_ID = "6918721957"
 DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 
+# ================================
+# SETTINGS
+# ================================
 ENTRY_DELAY = 2
-MG_STEP = 2
-MAX_MG_STEPS = 3
 EXPIRY_MINUTES = 2
-
-MAX_PRICES = 700
-TICK_CONFIRMATION = 3
+COOLDOWN_MINUTES = 5  # prevents spam
+MAX_PRICES = 300
 
 BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
+# ================================
+# STATE
+# ================================
 prices = {}
-tick_confirm = {}
-active_signal = {"pair": None, "expiry_time": None}
-COOLDOWN = False
+last_signal_time = {}
+last_signal_pair = None
 
-last_trade = {
-    "pair": None,
-    "direction": None
-}
-
-# ================================
-# 🧠 BOT START TIME (NEW)
-# ================================
-WARMUP_TIME = 180  # 3 minutes
-bot_start_time = datetime.now(TIMEZONE)
-
-def warmup_done():
-    return (datetime.now(TIMEZONE) - bot_start_time).seconds > WARMUP_TIME
+COOLDOWN_UNTIL = None
 
 
 # ================================
@@ -56,271 +46,73 @@ def valid_session():
 
 
 # ================================
-# VOLATILITY
+# SIMPLE TREND
 # ================================
-def good_volatility(price_list):
-    if len(price_list) < 50:
-        return False
-    return np.std(price_list[-50:]) > 0.0003
-
-
-# ================================
-# STABILITY FILTER
-# ================================
-def stable_market(price_list):
-    if len(price_list) < 20:
-        return False
-
-    recent = price_list[-20:]
-    moves = [abs(recent[i] - recent[i-1]) for i in range(1, len(recent))]
-
-    avg_move = np.mean(moves)
-    max_move = max(moves)
-
-    if max_move > avg_move * 3:
-        return False
-
-    if avg_move < 0.00005:
-        return False
-
-    return True
-
-
-# ================================
-# STRONG MOVE
-# ================================
-def strong_movement(price_list):
-    if len(price_list) < 20:
-        return False
-
-    move = abs(price_list[-1] - price_list[-5])
-    volatility = np.std(price_list[-20:])
-
-    return move > volatility * 1.2
-
-
-# ================================
-# MICRO EXPANSION FILTER
-# ================================
-def expansion_filter(price_list):
-    if len(price_list) < 20:
-        return False
-
-    recent = price_list[-10:]
-    moves = [abs(recent[i] - recent[i-1]) for i in range(1, len(recent))]
-
-    avg_move = np.mean(moves)
-    last_move = moves[-1]
-
-    if avg_move < 0.00004:
-        return False
-
-    if last_move < avg_move * 0.8:
-        return False
-
-    return True
-
-
-# ================================
-# CONTINUATION CHECK
-# ================================
-def continuation_check(price_list, direction):
-    if len(price_list) < 15:
-        return False
-
-    recent = price_list[-10:]
-    move = recent[-1] - recent[0]
-    volatility = np.std(recent)
-
-    if abs(move) > volatility * 2.5:
-        return False
-
-    return True
-
-
-# ================================
-# MID TREND FILTER
-# ================================
-def mid_trend_filter(price_list, direction):
-    if len(price_list) < 20:
-        return False
-
-    recent = price_list[-10:]
-    net_move = recent[-1] - recent[0]
-    volatility = np.std(recent)
-
-    moves = [recent[i] - recent[i-1] for i in range(1, len(recent))]
-
-    if direction == "BUY":
-        if net_move <= 0:
-            return False
-        if abs(net_move) < volatility * 1.2:
-            return False
-        if sum(1 for m in moves if m > 0) < 6:
-            return False
-        return True
-
-    if direction == "SELL":
-        if net_move >= 0:
-            return False
-        if abs(net_move) < volatility * 1.2:
-            return False
-        if sum(1 for m in moves if m < 0) < 6:
-            return False
-        return True
-
-    return False
-
-
-# ================================
-# EARLY TREND
-# ================================
-def early_trend(price_list):
-    if len(price_list) < 15:
+def get_direction(price_list):
+    if len(price_list) < 10:
         return None
 
     move = price_list[-1] - price_list[-10]
 
-    if move > 0:
-        return "BUY"
-    elif move < 0:
-        return "SELL"
+    if abs(move) < 0.0001:
+        return None
 
-    return None
+    return "BUY" if move > 0 else "SELL"
 
 
 # ================================
-# PULLBACK CONFIRM
+# VOLATILITY CHECK (simple)
 # ================================
-def pullback_confirm(price_list, direction):
-    if len(price_list) < 5:
+def good_market(price_list):
+    if len(price_list) < 20:
         return False
 
-    if direction == "BUY":
-        return price_list[-1] > price_list[-2]
-
-    if direction == "SELL":
-        return price_list[-1] < price_list[-2]
-
-    return False
+    volatility = np.std(price_list[-20:])
+    return volatility > 0.00005
 
 
 # ================================
-# TREND BUILDING
+# ANTI-SPAM CHECK
 # ================================
-def trend_building(price_list, direction):
-    if len(price_list) < 15:
-        return False
-
-    moves = [price_list[i] - price_list[i-1] for i in range(-5, 0)]
-
-    if direction == "BUY":
-        return sum(1 for m in moves if m > 0) >= 3
-
-    if direction == "SELL":
-        return sum(1 for m in moves if m < 0) >= 3
-
-    return False
-
-
-# ================================
-# ANTI REENTRY
-# ================================
-def avoid_reentry(price_list, pair, direction):
-    if last_trade["pair"] != pair:
-        return True
-
-    if len(price_list) < 15:
-        return False
-
-    recent = price_list[-10:]
-    move = recent[-1] - recent[-1]
-
-    if last_trade["direction"] == "SELL" and move > 0:
-        return False
-
-    if last_trade["direction"] == "BUY" and move < 0:
-        return False
-
-    return True
-
-
-# ================================
-# 🔥 NEW: LATE ENTRY BLOCKER
-# ================================
-def late_entry_blocker(price_list):
-    if len(price_list) < 25:
-        return True
-
-    recent = price_list[-20:]
-
-    move_size = abs(recent[-1] - recent[0])
-    volatility = np.std(recent)
-
-    if move_size > volatility * 2.2:
-        return False
-
-    return True
-
-
-# ================================
-# SIGNAL LOCK
-# ================================
-def reset_signal():
-    global active_signal, COOLDOWN
-    active_signal = {"pair": None, "expiry_time": None}
-    COOLDOWN = False
-
-def signal_active():
-    if active_signal["expiry_time"] is None:
-        return False
-
-    if datetime.now(TIMEZONE) >= active_signal["expiry_time"]:
-        reset_signal()
-        return False
-
-    return True
-
-def register_signal(pair):
-    reset_signal()
+def can_send_signal(pair):
+    global COOLDOWN_UNTIL, last_signal_pair
 
     now = datetime.now(TIMEZONE)
-    active_signal["pair"] = pair
-    active_signal["expiry_time"] = now + timedelta(minutes=EXPIRY_MINUTES + 1)
 
-    global COOLDOWN
-    COOLDOWN = True
+    # cooldown active
+    if COOLDOWN_UNTIL and now < COOLDOWN_UNTIL:
+        return False
+
+    # prevent same pair spam
+    if last_signal_pair == pair:
+        return False
+
+    return True
+
+
+# ================================
+# REGISTER SIGNAL
+# ================================
+def register_signal(pair):
+    global COOLDOWN_UNTIL, last_signal_pair
+
+    last_signal_pair = pair
+    COOLDOWN_UNTIL = datetime.now(TIMEZONE) + timedelta(minutes=COOLDOWN_MINUTES)
 
 
 # ================================
 # SEND SIGNAL
 # ================================
 def send_signal(pair, direction):
-    global last_trade
-
     now = datetime.now(TIMEZONE)
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
 
-    mg_times = [
-        entry_time + timedelta(minutes=MG_STEP * i)
-        for i in range(1, MAX_MG_STEPS + 1)
-    ]
-
-    register_signal(pair)
-
-    last_trade["pair"] = pair
-    last_trade["direction"] = direction
-
     msg = (
-        f"🚨 TRADE SIGNAL All Options Broker\n\n"
+        f"🚨 TRADE SIGNAL\n\n"
         f"PAIR: {pair}\n"
         f"DIRECTION: {direction}\n\n"
         f"ENTRY: {entry_time.strftime('%I:%M %p')}\n"
-        f"EXPIRY: {EXPIRY_MINUTES} min\n\n"
-        f"📊 MARTINGALE LEVELS\n"
-        f"🔹 L1 → {mg_times[0].strftime('%I:%M %p')}\n"
-        f"🔹 L2 → {mg_times[1].strftime('%I:%M %p')}\n"
-        f"🔹 L3 → {mg_times[2].strftime('%I:%M %p')}"
+        f"EXPIRY: {EXPIRY_MINUTES} min\n"
     )
 
     try:
@@ -331,6 +123,8 @@ def send_signal(pair, direction):
         )
     except:
         pass
+
+    register_signal(pair)
 
 
 # ================================
@@ -356,22 +150,12 @@ async def load_symbols():
 # MAIN LOOP
 # ================================
 async def monitor():
-    global COOLDOWN
 
     while True:
         try:
-            if COOLDOWN and not signal_active():
-                COOLDOWN = False
-
-            if COOLDOWN:
-                await asyncio.sleep(1)
-                continue
 
             if not valid_session():
-                await asyncio.sleep(30)
-                continue
-
-            if not warmup_done():
+                await asyncio.sleep(10)
                 continue
 
             symbols = await load_symbols()
@@ -381,8 +165,8 @@ async def monitor():
                 continue
 
             for s in symbols:
-                prices[s] = []
-                tick_confirm[s] = {"count": 0, "direction": None}
+                if s not in prices:
+                    prices[s] = []
 
             async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
 
@@ -390,8 +174,6 @@ async def monitor():
                     await ws.send(json.dumps({"ticks": s, "subscribe": 1}))
 
                 async for msg in ws:
-                    if COOLDOWN:
-                        break
 
                     data = json.loads(msg)
 
@@ -406,50 +188,20 @@ async def monitor():
                     if len(prices[pair]) > MAX_PRICES:
                         prices[pair].pop(0)
 
-                    if not good_volatility(prices[pair]):
+                    # skip weak data
+                    if not good_market(prices[pair]):
                         continue
 
-                    if not stable_market(prices[pair]):
-                        continue
-
-                    if not strong_movement(prices[pair]):
-                        continue
-
-                    if not expansion_filter(prices[pair]):
-                        continue
-
-                    direction = early_trend(prices[pair])
+                    direction = get_direction(prices[pair])
 
                     if not direction:
                         continue
 
-                    if not continuation_check(prices[pair], direction):
+                    # ANTI-SPAM CHECK
+                    if not can_send_signal(pair):
                         continue
 
-                    if not pullback_confirm(prices[pair], direction):
-                        continue
-
-                    if not trend_building(prices[pair], direction):
-                        continue
-
-                    if not mid_trend_filter(prices[pair], direction):
-                        continue
-
-                    if not late_entry_blocker(prices[pair]):
-                        continue
-
-                    if not avoid_reentry(prices[pair], pair, direction):
-                        continue
-
-                    if tick_confirm[pair]["direction"] == direction:
-                        tick_confirm[pair]["count"] += 1
-                    else:
-                        tick_confirm[pair]["direction"] = direction
-                        tick_confirm[pair]["count"] = 1
-
-                    if tick_confirm[pair]["count"] >= TICK_CONFIRMATION:
-                        send_signal(pair, direction)
-                        break
+                    send_signal(pair, direction)
 
         except Exception:
             await asyncio.sleep(3)
