@@ -38,11 +38,22 @@ last_trade = {
 }
 
 # ================================
+# 🧠 BOT START TIME (NEW)
+# ================================
+WARMUP_TIME = 180  # 3 minutes
+bot_start_time = datetime.now(TIMEZONE)
+
+def warmup_done():
+    return (datetime.now(TIMEZONE) - bot_start_time).seconds > WARMUP_TIME
+
+
+# ================================
 # SESSION FILTER
 # ================================
 def valid_session():
     hour = datetime.now(TIMEZONE).hour
     return 8 <= hour <= 22
+
 
 # ================================
 # VOLATILITY
@@ -51,6 +62,7 @@ def good_volatility(price_list):
     if len(price_list) < 50:
         return False
     return np.std(price_list[-50:]) > 0.0003
+
 
 # ================================
 # STABILITY FILTER
@@ -73,6 +85,7 @@ def stable_market(price_list):
 
     return True
 
+
 # ================================
 # STRONG MOVE
 # ================================
@@ -85,8 +98,9 @@ def strong_movement(price_list):
 
     return move > volatility * 1.2
 
+
 # ================================
-# 🔥 NEW: MICRO-EXPANSION FILTER
+# MICRO EXPANSION FILTER
 # ================================
 def expansion_filter(price_list):
     if len(price_list) < 20:
@@ -106,8 +120,9 @@ def expansion_filter(price_list):
 
     return True
 
+
 # ================================
-# 🔥 NEW: CONTINUATION CHECK
+# CONTINUATION CHECK
 # ================================
 def continuation_check(price_list, direction):
     if len(price_list) < 15:
@@ -122,8 +137,9 @@ def continuation_check(price_list, direction):
 
     return True
 
+
 # ================================
-# MID-TREND FILTER
+# MID TREND FILTER
 # ================================
 def mid_trend_filter(price_list, direction):
     if len(price_list) < 20:
@@ -155,6 +171,7 @@ def mid_trend_filter(price_list, direction):
 
     return False
 
+
 # ================================
 # EARLY TREND
 # ================================
@@ -171,6 +188,7 @@ def early_trend(price_list):
 
     return None
 
+
 # ================================
 # PULLBACK CONFIRM
 # ================================
@@ -185,6 +203,7 @@ def pullback_confirm(price_list, direction):
         return price_list[-1] < price_list[-2]
 
     return False
+
 
 # ================================
 # TREND BUILDING
@@ -203,8 +222,9 @@ def trend_building(price_list, direction):
 
     return False
 
+
 # ================================
-# ANTI-REENTRY
+# ANTI REENTRY
 # ================================
 def avoid_reentry(price_list, pair, direction):
     if last_trade["pair"] != pair:
@@ -214,7 +234,7 @@ def avoid_reentry(price_list, pair, direction):
         return False
 
     recent = price_list[-10:]
-    move = recent[-1] - recent[0]
+    move = recent[-1] - recent[-1]
 
     if last_trade["direction"] == "SELL" and move > 0:
         return False
@@ -223,6 +243,25 @@ def avoid_reentry(price_list, pair, direction):
         return False
 
     return True
+
+
+# ================================
+# 🔥 NEW: LATE ENTRY BLOCKER
+# ================================
+def late_entry_blocker(price_list):
+    if len(price_list) < 25:
+        return True
+
+    recent = price_list[-20:]
+
+    move_size = abs(recent[-1] - recent[0])
+    volatility = np.std(recent)
+
+    if move_size > volatility * 2.2:
+        return False
+
+    return True
+
 
 # ================================
 # SIGNAL LOCK
@@ -251,6 +290,7 @@ def register_signal(pair):
 
     global COOLDOWN
     COOLDOWN = True
+
 
 # ================================
 # SEND SIGNAL
@@ -292,6 +332,7 @@ def send_signal(pair, direction):
     except:
         pass
 
+
 # ================================
 # LOAD SYMBOLS
 # ================================
@@ -310,6 +351,7 @@ async def load_symbols():
     except:
         return []
 
+
 # ================================
 # MAIN LOOP
 # ================================
@@ -327,6 +369,9 @@ async def monitor():
 
             if not valid_session():
                 await asyncio.sleep(30)
+                continue
+
+            if not warmup_done():
                 continue
 
             symbols = await load_symbols()
@@ -370,7 +415,6 @@ async def monitor():
                     if not strong_movement(prices[pair]):
                         continue
 
-                    # ✅ NEW FILTERS (SAFE POSITION)
                     if not expansion_filter(prices[pair]):
                         continue
 
@@ -391,6 +435,9 @@ async def monitor():
                     if not mid_trend_filter(prices[pair], direction):
                         continue
 
+                    if not late_entry_blocker(prices[pair]):
+                        continue
+
                     if not avoid_reentry(prices[pair], pair, direction):
                         continue
 
@@ -406,6 +453,7 @@ async def monitor():
 
         except Exception:
             await asyncio.sleep(3)
+
 
 # ================================
 # START
