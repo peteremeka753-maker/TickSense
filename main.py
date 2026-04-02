@@ -1,6 +1,6 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
-# CLEAN RESET VERSION (STABLE + NO SPAM)
+# CLEAN REBUILD SYSTEM (STABLE CORE)
 # ======================================
 
 import asyncio
@@ -22,19 +22,22 @@ TIMEZONE = pytz.timezone("Africa/Lagos")
 # ================================
 ENTRY_DELAY = 2
 EXPIRY_MINUTES = 2
-COOLDOWN_MINUTES = 5  # prevents spam
-MAX_PRICES = 300
+COOLDOWN_MINUTES = 5
+MAX_PRICES = 200
+TREND_WINDOW = 12
+MIN_VOLATILITY = 0.00005
 
-BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
+BLOCKED_PAIRS = [
+    "frxUSDNOK","frxGBPNOK","frxUSDPLN",
+    "frxGBPNZD","frxUSDSEK"
+]
 
 # ================================
 # STATE
 # ================================
 prices = {}
-last_signal_time = {}
 last_signal_pair = None
-
-COOLDOWN_UNTIL = None
+cooldown_until = None
 
 
 # ================================
@@ -46,58 +49,71 @@ def valid_session():
 
 
 # ================================
-# SIMPLE TREND
-# ================================
-def get_direction(price_list):
-    if len(price_list) < 10:
-        return None
-
-    move = price_list[-1] - price_list[-10]
-
-    if abs(move) < 0.0001:
-        return None
-
-    return "BUY" if move > 0 else "SELL"
-
-
-# ================================
-# VOLATILITY CHECK (simple)
+# VOLATILITY CHECK
 # ================================
 def good_market(price_list):
     if len(price_list) < 20:
         return False
 
-    volatility = np.std(price_list[-20:])
-    return volatility > 0.00005
+    return np.std(price_list[-20:]) > MIN_VOLATILITY
 
 
 # ================================
-# ANTI-SPAM CHECK
+# SIMPLE TREND DETECTION
 # ================================
-def can_send_signal(pair):
-    global COOLDOWN_UNTIL, last_signal_pair
+def get_trend(price_list):
+    if len(price_list) < TREND_WINDOW:
+        return None
+
+    start = price_list[-TREND_WINDOW]
+    end = price_list[-1]
+
+    diff = end - start
+
+    if abs(diff) < 0.0001:
+        return None
+
+    return "BUY" if diff > 0 else "SELL"
+
+
+# ================================
+# ENTRY CONFIRMATION (TICK FILTER)
+# ================================
+def confirm_entry(price_list, direction):
+    if len(price_list) < 3:
+        return False
+
+    if direction == "BUY":
+        return price_list[-1] > price_list[-2] > price_list[-3]
+
+    if direction == "SELL":
+        return price_list[-1] < price_list[-2] < price_list[-3]
+
+    return False
+
+
+# ================================
+# ANTI-SPAM
+# ================================
+def can_send(pair):
+    global cooldown_until, last_signal_pair
 
     now = datetime.now(TIMEZONE)
 
-    # cooldown active
-    if COOLDOWN_UNTIL and now < COOLDOWN_UNTIL:
+    if cooldown_until and now < cooldown_until:
         return False
 
-    # prevent same pair spam
     if last_signal_pair == pair:
         return False
 
     return True
 
 
-# ================================
-# REGISTER SIGNAL
-# ================================
 def register_signal(pair):
-    global COOLDOWN_UNTIL, last_signal_pair
+    global cooldown_until, last_signal_pair
 
     last_signal_pair = pair
-    COOLDOWN_UNTIL = datetime.now(TIMEZONE) + timedelta(minutes=COOLDOWN_MINUTES)
+    cooldown_until = datetime.now(TIMEZONE) + timedelta(minutes=COOLDOWN_MINUTES)
 
 
 # ================================
@@ -105,14 +121,14 @@ def register_signal(pair):
 # ================================
 def send_signal(pair, direction):
     now = datetime.now(TIMEZONE)
-    entry_time = now + timedelta(minutes=ENTRY_DELAY)
+    entry = now + timedelta(minutes=ENTRY_DELAY)
 
     msg = (
-        f"🚨 TRADE SIGNAL\n\n"
+        f"🚨 CLEAN SIGNAL BOT\n\n"
         f"PAIR: {pair}\n"
         f"DIRECTION: {direction}\n\n"
-        f"ENTRY: {entry_time.strftime('%I:%M %p')}\n"
-        f"EXPIRY: {EXPIRY_MINUTES} min\n"
+        f"ENTRY: {entry.strftime('%I:%M %p')}\n"
+        f"EXPIRY: {EXPIRY_MINUTES} min"
     )
 
     try:
@@ -132,7 +148,7 @@ def send_signal(pair, direction):
 # ================================
 async def load_symbols():
     try:
-        async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
+        async with websockets.connect(DERIV_WS) as ws:
             await ws.send(json.dumps({"active_symbols": "brief"}))
             data = json.loads(await ws.recv())
 
@@ -168,7 +184,7 @@ async def monitor():
                 if s not in prices:
                     prices[s] = []
 
-            async with websockets.connect(DERIV_WS, ping_interval=20) as ws:
+            async with websockets.connect(DERIV_WS) as ws:
 
                 for s in symbols:
                     await ws.send(json.dumps({"ticks": s, "subscribe": 1}))
@@ -188,17 +204,21 @@ async def monitor():
                     if len(prices[pair]) > MAX_PRICES:
                         prices[pair].pop(0)
 
-                    # skip weak data
+                    # FILTER 1: MARKET QUALITY
                     if not good_market(prices[pair]):
                         continue
 
-                    direction = get_direction(prices[pair])
-
+                    # FILTER 2: TREND
+                    direction = get_trend(prices[pair])
                     if not direction:
                         continue
 
-                    # ANTI-SPAM CHECK
-                    if not can_send_signal(pair):
+                    # FILTER 3: CONFIRMATION
+                    if not confirm_entry(prices[pair], direction):
+                        continue
+
+                    # FILTER 4: ANTI-SPAM
+                    if not can_send(pair):
                         continue
 
                     send_signal(pair, direction)
