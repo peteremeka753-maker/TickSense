@@ -1,6 +1,6 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
-# FINAL SNIPER + STABILITY VERSION (FIXED + ANTI-REENTRY LOCK)
+# FINAL SNIPER + STABILITY VERSION (FIXED)
 # ======================================
 
 import asyncio
@@ -29,18 +29,12 @@ BLOCKED_PAIRS = ["frxUSDNOK","frxGBPNOK","frxUSDPLN","frxGBPNZD","frxUSDSEK"]
 
 prices = {}
 tick_confirm = {}
-
 active_signal = {"pair": None, "expiry_time": None}
-
 COOLDOWN = False
 
-# ================================
-# NEW ANTI-SPAM MEMORY SYSTEM
-# ================================
 last_trade = {
     "pair": None,
-    "direction": None,
-    "block_until": None
+    "direction": None
 }
 
 # ================================
@@ -92,6 +86,43 @@ def strong_movement(price_list):
     return move > volatility * 1.2
 
 # ================================
+# 🔥 NEW: MICRO-EXPANSION FILTER
+# ================================
+def expansion_filter(price_list):
+    if len(price_list) < 20:
+        return False
+
+    recent = price_list[-10:]
+    moves = [abs(recent[i] - recent[i-1]) for i in range(1, len(recent))]
+
+    avg_move = np.mean(moves)
+    last_move = moves[-1]
+
+    if avg_move < 0.00004:
+        return False
+
+    if last_move < avg_move * 0.8:
+        return False
+
+    return True
+
+# ================================
+# 🔥 NEW: CONTINUATION CHECK
+# ================================
+def continuation_check(price_list, direction):
+    if len(price_list) < 15:
+        return False
+
+    recent = price_list[-10:]
+    move = recent[-1] - recent[0]
+    volatility = np.std(recent)
+
+    if abs(move) > volatility * 2.5:
+        return False
+
+    return True
+
+# ================================
 # MID-TREND FILTER
 # ================================
 def mid_trend_filter(price_list, direction):
@@ -99,7 +130,7 @@ def mid_trend_filter(price_list, direction):
         return False
 
     recent = price_list[-10:]
-    net_move = recent[-1] - recent[-0]
+    net_move = recent[-1] - recent[0]
     volatility = np.std(recent)
 
     moves = [recent[i] - recent[i-1] for i in range(1, len(recent))]
@@ -173,28 +204,23 @@ def trend_building(price_list, direction):
     return False
 
 # ================================
-# NEW: CROSS-PAIR REENTRY + TIME LOCK
+# ANTI-REENTRY
 # ================================
 def avoid_reentry(price_list, pair, direction):
-    now = datetime.now(TIMEZONE)
+    if last_trade["pair"] != pair:
+        return True
 
-    # block if still in cooldown window
-    if last_trade["block_until"] and now < last_trade["block_until"]:
+    if len(price_list) < 15:
         return False
 
-    if last_trade["pair"] == pair:
-        if last_trade["direction"] == direction:
-            return False  # same signal spam block
+    recent = price_list[-10:]
+    move = recent[-1] - recent[0]
 
-        # prevent flip-flop immediately after expiry
-        if len(price_list) >= 10:
-            move = price_list[-1] - price_list[-10]
+    if last_trade["direction"] == "SELL" and move > 0:
+        return False
 
-            if last_trade["direction"] == "BUY" and move < 0:
-                return False
-
-            if last_trade["direction"] == "SELL" and move > 0:
-                return False
+    if last_trade["direction"] == "BUY" and move < 0:
+        return False
 
     return True
 
@@ -242,10 +268,8 @@ def send_signal(pair, direction):
 
     register_signal(pair)
 
-    # 🔒 STRONG LOCK (THIS FIXES YOUR ISSUE)
     last_trade["pair"] = pair
     last_trade["direction"] = direction
-    last_trade["block_until"] = now + timedelta(minutes=EXPIRY_MINUTES + 2)
 
     msg = (
         f"🚨 TRADE SIGNAL All Options Broker\n\n"
@@ -346,9 +370,16 @@ async def monitor():
                     if not strong_movement(prices[pair]):
                         continue
 
+                    # ✅ NEW FILTERS (SAFE POSITION)
+                    if not expansion_filter(prices[pair]):
+                        continue
+
                     direction = early_trend(prices[pair])
 
                     if not direction:
+                        continue
+
+                    if not continuation_check(prices[pair], direction):
                         continue
 
                     if not pullback_confirm(prices[pair], direction):
