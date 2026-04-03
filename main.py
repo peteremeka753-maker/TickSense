@@ -1,6 +1,6 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
-# RANKING + SAFE ENGINE VERSION (CLEAN)
+# RANKING + SAFE ENGINE + MARTINGALE
 # ======================================
 
 import asyncio
@@ -23,10 +23,14 @@ TIMEZONE = pytz.timezone("Africa/Lagos")
 
 ENTRY_DELAY = 2
 EXPIRY_MINUTES = 2
-COOLDOWN_SECONDS = 180
+COOLDOWN_SECONDS = 60   # 🔥 reduced
+
+# 🔥 MARTINGALE
+MG_STEP = 2
+MAX_MG = 3
 
 MAX_PRICES = 700
-WARMUP_TIME = 180  # 3 min
+WARMUP_TIME = 180
 
 BLOCKED_PAIRS = [
     "frxUSDNOK","frxGBPNOK","frxUSDPLN",
@@ -38,8 +42,11 @@ BLOCKED_PAIRS = [
 # ================================
 prices = defaultdict(lambda: deque(maxlen=MAX_PRICES))
 last_trade_time = 0
-active_signal = None
 bot_start_time = datetime.now(TIMEZONE)
+
+# 🔥 FOCUS SYSTEM
+focused_pair = None
+focus_start_time = 0
 
 # ================================
 # UTIL
@@ -55,23 +62,21 @@ def valid_session():
     return 8 <= hour <= 22
 
 # ================================
-# TICK INPUT (from websocket)
+# TICK INPUT
 # ================================
 def on_tick(pair, price):
     prices[pair].append(price)
 
 # ================================
-# CORE SCORING ENGINE
+# SCORING
 # ================================
 def score_pair(data):
     if len(data) < 30:
         return 0
 
     arr = list(data)[-30:]
-
     trend = arr[-1] - arr[0]
     moves = [abs(arr[i] - arr[i - 1]) for i in range(1, len(arr))]
-
     volatility = np.mean(moves)
 
     if volatility == 0:
@@ -80,7 +85,7 @@ def score_pair(data):
     return trend / volatility
 
 # ================================
-# GLOBAL RANKING SYSTEM
+# RANKING
 # ================================
 def rank_pairs():
     scored = []
@@ -93,13 +98,14 @@ def rank_pairs():
         scored.append((pair, s))
 
     scored.sort(key=lambda x: abs(x[1]), reverse=True)
-
     return scored
 
 # ================================
-# SIGNAL ENGINE (ONLY DECISION POINT)
+# SIGNAL ENGINE (FOCUS + WAIT)
 # ================================
 def generate_signal():
+    global focused_pair, focus_start_time
+
     ranked = rank_pairs()
 
     if not ranked:
@@ -107,20 +113,39 @@ def generate_signal():
 
     pair, score = ranked[0]
 
-    # market quality filter (simple & stable)
-    if abs(score) < 0.7:
+    # 🔥 relaxed threshold
+    if abs(score) < 0.3:
+        return None
+
+    now = datetime.now().timestamp()
+
+    # LOCK PAIR
+    if focused_pair is None:
+        focused_pair = pair
+        focus_start_time = now
+        return None
+
+    # RESET if changed
+    if pair != focused_pair:
+        focused_pair = pair
+        focus_start_time = now
+        return None
+
+    # WAIT before entry
+    if now - focus_start_time < 15:
         return None
 
     direction = "BUY" if score > 0 else "SELL"
 
+    focused_pair = None
+
     return {
         "pair": pair,
-        "direction": direction,
-        "strength": round(score, 3)
+        "direction": direction
     }
 
 # ================================
-# SIGNAL HANDLER
+# SEND SIGNAL (WITH MARTINGALE)
 # ================================
 def send_signal(pair, direction):
     global last_trade_time
@@ -128,12 +153,21 @@ def send_signal(pair, direction):
     now = datetime.now(TIMEZONE)
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
 
+    mg_times = [
+        entry_time + timedelta(minutes=MG_STEP * i)
+        for i in range(1, MAX_MG + 1)
+    ]
+
     msg = (
         f"🚨 OTC SIGNAL BOT\n\n"
         f"PAIR: {pair}\n"
         f"DIRECTION: {direction}\n\n"
         f"ENTRY: {entry_time.strftime('%I:%M %p')}\n"
-        f"EXPIRY: {EXPIRY_MINUTES} min\n"
+        f"EXPIRY: {EXPIRY_MINUTES} min\n\n"
+        f"📊 MARTINGALE\n"
+        f"🔹 L1 → {mg_times[0].strftime('%I:%M %p')}\n"
+        f"🔹 L2 → {mg_times[1].strftime('%I:%M %p')}\n"
+        f"🔹 L3 → {mg_times[2].strftime('%I:%M %p')}"
     )
 
     try:
@@ -162,7 +196,6 @@ async def load_symbols():
                 if s["symbol"].startswith("frx")
                 and s["symbol"] not in BLOCKED_PAIRS
             ]
-
     except:
         return []
 
@@ -170,8 +203,6 @@ async def load_symbols():
 # MAIN LOOP
 # ================================
 async def monitor():
-    global active_signal
-
     while True:
         try:
 
@@ -208,9 +239,6 @@ async def monitor():
 
                     on_tick(pair, price)
 
-                    # =========================
-                    # RANK + SIGNAL (ONLY ONCE)
-                    # =========================
                     signal = generate_signal()
 
                     if signal:
