@@ -23,9 +23,8 @@ TIMEZONE = pytz.timezone("Africa/Lagos")
 
 ENTRY_DELAY = 2
 EXPIRY_MINUTES = 2
-COOLDOWN_SECONDS = 60   # 🔥 reduced
+COOLDOWN_SECONDS = 60
 
-# 🔥 MARTINGALE
 MG_STEP = 2
 MAX_MG = 3
 
@@ -44,9 +43,11 @@ prices = defaultdict(lambda: deque(maxlen=MAX_PRICES))
 last_trade_time = 0
 bot_start_time = datetime.now(TIMEZONE)
 
-# 🔥 FOCUS SYSTEM
 focused_pair = None
 focus_start_time = 0
+
+# 🔥 NEW: SIGNAL LOCK TIMER
+next_trade_allowed_time = 0
 
 # ================================
 # UTIL
@@ -55,7 +56,7 @@ def warmup_done():
     return (datetime.now(TIMEZONE) - bot_start_time).seconds > WARMUP_TIME
 
 def cooldown_ok():
-    return (datetime.now().timestamp() - last_trade_time) > COOLDOWN_SECONDS
+    return datetime.now().timestamp() > next_trade_allowed_time
 
 def valid_session():
     hour = datetime.now(TIMEZONE).hour
@@ -101,7 +102,7 @@ def rank_pairs():
     return scored
 
 # ================================
-# SIGNAL ENGINE (FOCUS + WAIT)
+# SIGNAL ENGINE
 # ================================
 def generate_signal():
     global focused_pair, focus_start_time
@@ -113,25 +114,21 @@ def generate_signal():
 
     pair, score = ranked[0]
 
-    # 🔥 relaxed threshold
     if abs(score) < 0.3:
         return None
 
     now = datetime.now().timestamp()
 
-    # LOCK PAIR
     if focused_pair is None:
         focused_pair = pair
         focus_start_time = now
         return None
 
-    # RESET if changed
     if pair != focused_pair:
         focused_pair = pair
         focus_start_time = now
         return None
 
-    # WAIT before entry
     if now - focus_start_time < 15:
         return None
 
@@ -145,10 +142,10 @@ def generate_signal():
     }
 
 # ================================
-# SEND SIGNAL (WITH MARTINGALE)
+# SEND SIGNAL
 # ================================
 def send_signal(pair, direction):
-    global last_trade_time
+    global last_trade_time, next_trade_allowed_time
 
     now = datetime.now(TIMEZONE)
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
@@ -180,6 +177,10 @@ def send_signal(pair, direction):
         pass
 
     last_trade_time = datetime.now().timestamp()
+
+    # 🔥 LOCK BOT UNTIL TRADE FINISHES
+    total_wait = (ENTRY_DELAY + EXPIRY_MINUTES) * 60
+    next_trade_allowed_time = datetime.now().timestamp() + total_wait
 
 # ================================
 # LOAD SYMBOLS
