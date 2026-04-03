@@ -1,6 +1,7 @@
 # ======================================
 # POCKET OPTION OTC SIGNAL BOT
 # RANKING + SAFE ENGINE + MARTINGALE
+# + PULLBACK + TREND STABILITY FILTER
 # ======================================
 
 import asyncio
@@ -45,8 +46,6 @@ bot_start_time = datetime.now(TIMEZONE)
 
 focused_pair = None
 focus_start_time = 0
-
-# 🔥 NEW: SIGNAL LOCK TIMER
 next_trade_allowed_time = 0
 
 # ================================
@@ -69,24 +68,71 @@ def on_tick(pair, price):
     prices[pair].append(price)
 
 # ================================
-# SCORING
+# PULLBACK DETECTION (NEW CORE LOGIC)
 # ================================
-def score_pair(data):
-    if len(data) < 30:
+def detect_pullback(arr):
+    if len(arr) < 30:
         return 0
 
-    arr = list(data)[-30:]
+    recent = arr[-30:]
+
+    start = recent[0]
+    mid = recent[15]
+    end = recent[-1]
+
+    trend = end - start
+
+    moves = [abs(recent[i] - recent[i - 1]) for i in range(1, len(recent))]
+    volatility = np.mean(moves)
+
+    if volatility == 0:
+        return 0
+
+    price_range = max(recent) - min(recent)
+
+    # reject sideways market
+    if price_range < volatility * 6:
+        return 0
+
+    pullback = mid - start
+
+    # BUY setup: uptrend + retrace
+    if trend > 0 and pullback < 0:
+        return 1
+
+    # SELL setup: downtrend + retrace
+    if trend < 0 and pullback > 0:
+        return -1
+
+    return 0
+
+# ================================
+# SCORING (HOT PAIR FILTER)
+# ================================
+def score_pair(data):
+    if len(data) < 50:
+        return 0
+
+    arr = list(data)[-50:]
+
     trend = arr[-1] - arr[0]
+
     moves = [abs(arr[i] - arr[i - 1]) for i in range(1, len(arr))]
     volatility = np.mean(moves)
 
     if volatility == 0:
         return 0
 
+    price_range = max(arr) - min(arr)
+
+    # remove ranging market
+    if price_range < volatility * 6:
+        return 0
+
     return trend / volatility
 
 # ================================
-# RANKING
+# RANKING (HOT PAIRS ONLY)
 # ================================
 def rank_pairs():
     scored = []
@@ -132,7 +178,13 @@ def generate_signal():
     if now - focus_start_time < 15:
         return None
 
-    direction = "BUY" if score > 0 else "SELL"
+    arr = list(prices[pair])
+    pull = detect_pullback(arr)
+
+    if pull == 0:
+        return None
+
+    direction = "BUY" if pull == 1 else "SELL"
 
     focused_pair = None
 
@@ -145,7 +197,7 @@ def generate_signal():
 # SEND SIGNAL
 # ================================
 def send_signal(pair, direction):
-    global last_trade_time, next_trade_allowed_time
+    global next_trade_allowed_time
 
     now = datetime.now(TIMEZONE)
     entry_time = now + timedelta(minutes=ENTRY_DELAY)
@@ -176,9 +228,6 @@ def send_signal(pair, direction):
     except:
         pass
 
-    last_trade_time = datetime.now().timestamp()
-
-    # 🔥 LOCK BOT UNTIL TRADE FINISHES
     total_wait = (ENTRY_DELAY + EXPIRY_MINUTES) * 60
     next_trade_allowed_time = datetime.now().timestamp() + total_wait
 
