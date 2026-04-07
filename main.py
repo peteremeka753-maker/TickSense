@@ -1,19 +1,19 @@
 # ======================================
-# REAL HYBRID AI TRADING BOT
-# Screenshot + DRIFT WebSocket + Learning Engine
+# V4.1 + V4 MERGED DERIV AI TRADING SYSTEM
+# FULL LIVE ENGINE + TELEGRAM + LEARNING + AUTO SYMBOLS
 # ======================================
 
 import os
-import csv
 import json
+import csv
 import asyncio
 import numpy as np
-from datetime import datetime, timedelta
+import websockets
 from io import BytesIO
+from datetime import datetime, timedelta
+
 import pytz
 from PIL import Image
-import websockets
-import threading
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -29,240 +29,257 @@ from telegram.ext import (
 # =========================
 
 BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
-
 TIMEZONE = pytz.timezone("Africa/Lagos")
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-TRADE_LOG = os.path.join(DATA_DIR, "trades.csv")
 LEARNING_FILE = os.path.join(DATA_DIR, "learning.json")
 
-SYMBOL = "R_100"  # DRIFT (Deriv) synthetic index
+WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 # =========================
 # GLOBAL STATE
 # =========================
 
-loss_streak = 0
+tick_buffer = {}
+learning = {}
 pause_until = None
 cooldown = {}
 
-tick_buffer = []
-learning = {"BUY": 0.0, "SELL": 0.0}
+symbols = []
 
 # =========================
-# INIT FILES
+# LOAD LEARNING
 # =========================
 
-if not os.path.exists(TRADE_LOG):
-    with open(TRADE_LOG, "w", newline="") as f:
-        csv.writer(f).writerow(["time", "direction", "result"])
-
-if os.path.exists(LEARNING_FILE):
-    with open(LEARNING_FILE, "r") as f:
-        learning = json.load(f)
+def load_learning():
+    global learning
+    if os.path.exists(LEARNING_FILE):
+        learning = json.load(open(LEARNING_FILE))
+    else:
+        learning = {}
 
 def save_learning():
     with open(LEARNING_FILE, "w") as f:
         json.dump(learning, f)
 
 # =========================
-# DRIFT WEBSOCKET (REAL TICKS)
+# AUTO SYMBOL LOADER
 # =========================
 
-async def drift_ticks():
-    global tick_buffer
+async def load_symbols():
+    global symbols
 
-    url = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+    async with websockets.connect(WS_URL) as ws:
+        await ws.send(json.dumps({
+            "active_symbols": "full",
+            "product_type": "basic"
+        }))
 
-    while True:
-        try:
-            async with websockets.connect(url) as ws:
+        msg = await ws.recv()
+        data = json.loads(msg)
 
-                await ws.send(json.dumps({
-                    "ticks": SYMBOL,
-                    "subscribe": 1
-                }))
+        syms = []
 
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
+        for item in data.get("active_symbols", []):
+            s = item["symbol"]
 
-                    if "tick" in data:
-                        price = float(data["tick"]["quote"])
+            if s.startswith("frx") or s.startswith("R_") or "BTC" in s or "ETH" in s:
+                syms.append(s)
 
-                        tick_buffer.append(price)
+        symbols = list(set(syms))
 
-                        if len(tick_buffer) > 50:
-                            tick_buffer.pop(0)
+        for s in symbols:
+            tick_buffer[s] = []
 
-        except Exception as e:
-            print("WebSocket reconnecting...", e)
-            await asyncio.sleep(3)
+        print(f"Loaded {len(symbols)} symbols")
 
 # =========================
-# TICK ANALYSIS ENGINE
+# WEBSOCKET STREAM
 # =========================
 
-def analyze_ticks():
-    if len(tick_buffer) < 10:
+async def stream_ticks():
+
+    async with websockets.connect(WS_URL) as ws:
+
+        for s in symbols:
+            await ws.send(json.dumps({
+                "ticks": s,
+                "subscribe": 1
+            }))
+
+        while True:
+            msg = await ws.recv()
+            data = json.loads(msg)
+
+            if "tick" in data:
+                symbol = data["tick"]["symbol"]
+                price = float(data["tick"]["quote"])
+
+                if symbol in tick_buffer:
+                    buf = tick_buffer[symbol]
+                    buf.append(price)
+
+                    if len(buf) > 50:
+                        buf.pop(0)
+
+# =========================
+# ANALYSIS ENGINE
+# =========================
+
+def tick_analysis(symbol):
+    buf = tick_buffer.get(symbol, [])
+
+    if len(buf) < 10:
         return "NEUTRAL", 0
 
-    diff = np.diff(tick_buffer[-20:])
+    diff = np.diff(buf[-20:])
     strength = np.mean(diff)
 
-    if strength > 0:
-        return "BUY", abs(strength)
-    else:
-        return "SELL", abs(strength)
+    return ("BUY", abs(strength)) if strength > 0 else ("SELL", abs(strength))
 
-# =========================
-# SCREENSHOT ANALYSIS
-# =========================
 
-def analyze_chart(image: Image.Image):
+def image_analysis(image: Image.Image):
 
     img = np.array(image.convert("L"))
     series = np.mean(img, axis=0)
     diff = np.diff(series)
 
     momentum = np.std(diff)
-    bullish = np.sum(diff > 0)
-
-    direction = "BUY" if bullish > len(diff)/2 else "SELL"
+    direction = "BUY" if np.sum(diff > 0) > np.sum(diff < 0) else "SELL"
 
     return direction, momentum
 
-# =========================
-# FINAL DECISION ENGINE
-# =========================
 
-def decision_engine(img_direction, momentum):
+def decision_engine(img_dir, tick_dir, momentum, strength):
 
-    tick_direction, strength = analyze_ticks()
+    score = 0
 
-    confidence = 0
-
-    # screenshot weight
-    if img_direction == tick_direction:
-        confidence += 2
+    if img_dir == tick_dir:
+        score += 2
     else:
-        confidence -= 1
+        score -= 1
 
-    # tick strength weight
-    confidence += strength
+    score += strength
+    score += momentum / 10
 
-    # momentum weight
-    confidence += momentum / 10
+    final = img_dir if score >= 1 else tick_dir
 
-    if confidence > 2:
-        return img_direction, "HIGH"
-    elif confidence > 0:
-        return img_direction, "MEDIUM"
-    else:
-        return tick_direction, "LOW"
+    return final, score
 
 # =========================
-# LEARNING SYSTEM
+# ENTRY LOGIC
 # =========================
 
-def update_learning(direction, result):
-    global loss_streak, pause_until
+def entry_time():
+    now = datetime.now(TIMEZONE)
+    return now + timedelta(seconds=(60 - now.second))
 
-    if result == "WIN":
-        learning[direction] += 0.05
-        loss_streak = 0
-    else:
-        learning[direction] -= 0.05
-        loss_streak += 1
-
-    save_learning()
-
-    if loss_streak >= 3:
-        pause_until = datetime.now(TIMEZONE) + timedelta(minutes=10)
+def expiry(momentum, strength):
+    score = momentum + strength
+    if score > 2:
+        return 1
+    elif score > 1:
+        return 3
+    return 5
 
 # =========================
-# TELEGRAM HANDLER
+# TELEGRAM HANDLERS
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    global cooldown, pause_until
+    global cooldown
 
     now = datetime.now(TIMEZONE)
 
-    if pause_until and now < pause_until:
-        await update.message.reply_text("⛔ Bot cooling down after losses.")
-        return
-
     if cooldown.get("global") and (now - cooldown["global"]).seconds < 60:
-        await update.message.reply_text("⏳ Wait a moment...")
         return
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
+
     bio = BytesIO()
     await file.download_to_memory(bio)
     bio.seek(0)
 
     image = Image.open(bio)
 
-    img_dir, momentum = analyze_chart(image)
+    symbol = symbols[0] if symbols else "R_100"
 
-    final_dir, strength = decision_engine(img_dir, momentum)
+    img_dir, momentum = image_analysis(image)
+    tick_dir, strength = tick_analysis(symbol)
 
-    entry_time = datetime.now(TIMEZONE) + timedelta(minutes=2)
-
-    duration = 1 if strength == "HIGH" else 3 if strength == "MEDIUM" else 5
-
-    cooldown["global"] = now
+    final, score = decision_engine(img_dir, tick_dir, momentum, strength)
 
     msg = (
-        f"📊 REAL HYBRID SIGNAL\n\n"
-        f"Direction: {final_dir}\n"
-        f"Strength: {strength}\n"
-        f"Entry: {entry_time.strftime('%H:%M:%S')}\n"
-        f"Duration: {duration} min\n"
+        f"📊 MERGED V4 SYSTEM\n\n"
+        f"Symbol: {symbol}\n"
+        f"Direction: {final}\n"
+        f"Score: {round(score,2)}\n"
+        f"Entry: {entry_time().strftime('%H:%M:%S')}\n"
+        f"Expiry: {expiry(momentum, strength)} min\n"
     )
 
     keyboard = [[
-        InlineKeyboardButton("WIN", callback_data=f"win_{final_dir}"),
-        InlineKeyboardButton("LOSS", callback_data=f"loss_{final_dir}")
+        InlineKeyboardButton("WIN", callback_data=f"win_{symbol}_{final}"),
+        InlineKeyboardButton("LOSS", callback_data=f"loss_{symbol}_{final}")
     ]]
+
+    cooldown["global"] = now
 
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =========================
-# BUTTON HANDLER
+# LEARNING SYSTEM
 # =========================
 
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def update_learning(symbol, direction, result):
+
+    if symbol not in learning:
+        learning[symbol] = {"BUY": 0.0, "SELL": 0.0}
+
+    if result == "WIN":
+        learning[symbol][direction] += 0.05
+    else:
+        learning[symbol][direction] -= 0.05
+
+    save_learning()
+
+# =========================
+# BUTTONS
+# =========================
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
-    result, direction = query.data.split("_")
+    result, symbol, direction = query.data.split("_")
 
-    update_learning(direction, "WIN" if result == "win" else "LOSS")
+    update_learning(symbol, direction, "WIN" if result == "win" else "LOSS")
 
-    await query.edit_message_text(f"Recorded: {result.upper()}")
+    await query.edit_message_text(f"Recorded {result.upper()}")
 
 # =========================
-# MAIN BOT
+# MAIN START
 # =========================
 
 async def main():
 
+    load_learning()
+    await load_symbols()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(CallbackQueryHandler(handle_button))
+    app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(drift_ticks())
+    asyncio.create_task(stream_ticks())
 
-    print("REAL HYBRID BOT RUNNING...")
+    print("MERGED V4 SYSTEM RUNNING...")
+
     await app.run_polling()
 
 # =========================
@@ -270,6 +287,4 @@ async def main():
 # =========================
 
 if __name__ == "__main__":
-    import nest_asyncio
-    nest_asyncio.apply()
     asyncio.run(main())
