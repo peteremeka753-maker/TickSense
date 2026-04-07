@@ -1,4 +1,6 @@
-websockets>=11.0.0
-requests>=2.31.0
-numpy>=1.24.0
-pytz>=2023.3
+python-telegram-bot==20.5
+numpy
+Pillow
+websockets
+pytz
+nest-asyncio
