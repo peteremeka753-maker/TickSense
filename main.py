@@ -1,6 +1,6 @@
 # ======================================
-# V4.2 PRO CANDLE AI TRADING SYSTEM
-# OPTION B + REAL TRADE ID + MULTI TF
+# FINAL V5 AI TRADING BOT (2-MIN SYSTEM)
+# SCREENSHOT + DERIV WS + LEARNING FIXED
 # ======================================
 
 import os
@@ -10,7 +10,6 @@ import numpy as np
 import websockets
 from io import BytesIO
 from datetime import datetime, timedelta
-from collections import defaultdict
 
 import pytz
 from PIL import Image
@@ -32,30 +31,12 @@ BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)
-
-LEARNING_FILE = os.path.join(DATA_DIR, "learning.json")
-
-# =========================
-# STATE
-# =========================
+DATA_FILE = "learning.json"
 
 learning = {}
-active_trades = {}   # TRADE ID tracking
+active_trades = {}
 
-tick_data = defaultdict(list)
-
-candles = {
-    "1s": [],
-    "3s": [],
-    "1m": [],
-    "5m": [],
-    "15m": [],
-    "1h": []
-}
-
-current_candle = {"1m": None}
+tick_buffer = []
 
 # =========================
 # LOAD / SAVE LEARNING
@@ -63,62 +44,43 @@ current_candle = {"1m": None}
 
 def load_learning():
     global learning
-    if os.path.exists(LEARNING_FILE):
-        learning = json.load(open(LEARNING_FILE))
+    if os.path.exists(DATA_FILE):
+        learning = json.load(open(DATA_FILE))
     else:
         learning = {}
 
 def save_learning():
-    with open(LEARNING_FILE, "w") as f:
+    with open(DATA_FILE, "w") as f:
         json.dump(learning, f, indent=2)
 
 # =========================
-# TRADE ID GENERATOR
+# TRADE ID
 # =========================
 
-def create_trade_id(symbol):
+def trade_id(symbol):
     return f"{symbol}_{datetime.now().timestamp()}"
 
 # =========================
-# CANDLE BUILDER (1 MIN CORE)
+# SCREENSHOT ANALYSIS
 # =========================
 
-def build_1m_candle(price):
-    now = datetime.now().replace(second=0, microsecond=0)
+def image_analysis(image: Image.Image):
 
-    c = current_candle.get("1m")
+    img = np.array(image.convert("L"))
+    series = np.mean(img, axis=0)
+    diff = np.diff(series)
 
-    if c is None:
-        current_candle["1m"] = {
-            "time": now,
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price
-        }
-        return
+    momentum = np.std(diff)
 
-    if now != c["time"]:
-        candles["1m"].append(c)
-        current_candle["1m"] = {
-            "time": now,
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price
-        }
-    else:
-        c["high"] = max(c["high"], price)
-        c["low"] = min(c["low"], price)
-        c["close"] = price
+    direction = "BUY" if np.sum(diff > 0) > np.sum(diff < 0) else "SELL"
+
+    return direction, momentum
 
 # =========================
-# STREAM TICKS
+# DERIV LIVE TICKS
 # =========================
 
-async def stream_ticks():
-
-    symbol = "frxUSDCHF"  # fixed for stability
+async def deriv_stream(symbol="frxUSDCHF"):
 
     async with websockets.connect(WS_URL) as ws:
 
@@ -133,57 +95,45 @@ async def stream_ticks():
 
             if "tick" in data:
                 price = float(data["tick"]["quote"])
+                tick_buffer.append(price)
 
-                tick_data[symbol].append(price)
-
-                if len(tick_data[symbol]) > 200:
-                    tick_data[symbol].pop(0)
-
-                build_1m_candle(price)
+                if len(tick_buffer) > 100:
+                    tick_buffer.pop(0)
 
 # =========================
-# MULTI TF ANALYSIS
+# MARKET CONFIRMATION
 # =========================
 
-def analyze_market():
+def market_analysis():
 
-    if len(candles["1m"]) < 5:
+    if len(tick_buffer) < 10:
         return "BUY", 0.5
 
-    last = candles["1m"][-5:]
+    diff = np.diff(tick_buffer[-10:])
+    strength = np.mean(diff)
 
-    bullish = sum(1 for c in last if c["close"] > c["open"])
-    bearish = len(last) - bullish
-
-    direction = "BUY" if bullish >= bearish else "SELL"
-    strength = abs(bullish - bearish) / 5
-
-    return direction, strength
+    return ("BUY", abs(strength)) if strength > 0 else ("SELL", abs(strength))
 
 # =========================
-# SCREENSHOT ANALYSIS
+# ENTRY + EXPIRY RULE
 # =========================
 
-def image_analysis(image: Image.Image):
+def entry_time():
+    now = datetime.now(TIMEZONE)
+    return now + timedelta(minutes=2)
 
-    img = np.array(image.convert("L"))
-    series = np.mean(img, axis=0)
-    diff = np.diff(series)
-
-    momentum = np.std(diff)
-    direction = "BUY" if np.sum(diff > 0) > np.sum(diff < 0) else "SELL"
-
-    return direction, momentum
+def expiry_time():
+    return 2  # fixed
 
 # =========================
-# SIGNAL ENGINE
+# MAIN SIGNAL ENGINE
 # =========================
 
-def decision_engine(img_dir, market_dir, momentum, strength):
+def decision(img_dir, mkt_dir, momentum, strength):
 
     score = 0
 
-    if img_dir == market_dir:
+    if img_dir == mkt_dir:
         score += 2
     else:
         score -= 1
@@ -191,10 +141,10 @@ def decision_engine(img_dir, market_dir, momentum, strength):
     score += strength
     score += momentum / 50
 
-    return (img_dir if score >= 1 else market_dir), score
+    return (img_dir if score >= 1 else mkt_dir), score
 
 # =========================
-# TELEGRAM HANDLER
+# PHOTO HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,61 +158,59 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     image = Image.open(bio)
 
-    # USER MUST TYPE PAIR
-    symbol = "USDCHF"
+    symbol = "USDCHF"  # user input in real version
 
     img_dir, momentum = image_analysis(image)
-    market_dir, strength = analyze_market()
+    mkt_dir, strength = market_analysis()
 
-    final, score = decision_engine(img_dir, market_dir, momentum, strength)
+    final, score = decision(img_dir, mkt_dir, momentum, strength)
 
-    trade_id = create_trade_id(symbol)
+    t_id = trade_id(symbol)
 
-    active_trades[trade_id] = {
+    active_trades[t_id] = {
         "symbol": symbol,
-        "direction": final,
-        "time": datetime.now().isoformat()
+        "direction": final
     }
 
     msg = (
-        f"📊 AI SIGNAL ENGINE (V4.2)\n\n"
+        f"📊 AI 2-MIN TRADING SYSTEM\n\n"
         f"Pair: {symbol}\n"
         f"Direction: {final}\n"
         f"Score: {round(score,2)}\n"
-        f"Trade ID: {trade_id}\n"
-        f"Entry: {datetime.now().strftime('%H:%M:%S')}\n"
-        f"TF: Multi-Timeframe (1s → 1m → 1h)\n"
+        f"Entry: {entry_time().strftime('%H:%M:%S')}\n"
+        f"Expiry: 2 MINUTES\n"
+        f"Trade ID: {t_id}\n"
     )
 
     keyboard = [[
-        InlineKeyboardButton("WIN", callback_data=f"win|{trade_id}"),
-        InlineKeyboardButton("LOSS", callback_data=f"loss|{trade_id}")
+        InlineKeyboardButton("WIN", callback_data=f"win|{t_id}"),
+        InlineKeyboardButton("LOSS", callback_data=f"loss|{t_id}")
     ]]
 
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =========================
-# WIN / LOSS SYSTEM (FIXED)
+# WIN / LOSS FIXED
 # =========================
 
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
-    result, trade_id = query.data.split("|")
+    result, t_id = query.data.split("|")
 
-    trade = active_trades.get(trade_id)
+    trade = active_trades.get(t_id)
 
     if not trade:
-        await query.edit_message_text("Trade not found.")
+        await query.edit_message_text("Trade not found")
         return
 
     symbol = trade["symbol"]
     direction = trade["direction"]
 
     if symbol not in learning:
-        learning[symbol] = {"BUY": 0.0, "SELL": 0.0}
+        learning[symbol] = {"BUY": 0, "SELL": 0}
 
     if result == "win":
         learning[symbol][direction] += 1
@@ -270,17 +218,16 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         learning[symbol][direction] -= 1
 
     save_learning()
+    del active_trades[t_id]
 
-    del active_trades[trade_id]
-
-    await query.edit_message_text(f"Recorded {result.upper()} ✔")
+    await query.edit_message_text(f"{result.upper()} recorded ✔")
 
 # =========================
 # BACKGROUND
 # =========================
 
-async def start_bg(app):
-    asyncio.create_task(stream_ticks())
+async def start(app):
+    asyncio.create_task(deriv_stream())
 
 # =========================
 # MAIN
@@ -293,17 +240,13 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(CallbackQueryHandler(handle_buttons))
+    app.add_handler(CallbackQueryHandler(buttons))
 
-    app.post_init = start_bg
+    app.post_init = start
 
-    print("V4.2 AI SYSTEM RUNNING...")
+    print("V5 AI BOT RUNNING...")
 
     app.run_polling()
-
-# =========================
-# START
-# =========================
 
 if __name__ == "__main__":
     main()
