@@ -1,7 +1,6 @@
 # ======================================
-# FINAL SAFE AI TRADER - PRODUCTION READY
-# Screenshot → Smart Entry + Duration + Adaptive Learning
-# Handles millions of trades, human-like learning, no placeholders
+# FINAL SAFE AI TRADER (STABLE VERSION)
+# Screenshot → Smart Entry + Duration + Protection
 # ======================================
 
 import os
@@ -18,10 +17,11 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandle
 # -------------------
 # CONFIG
 # -------------------
-BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"  # Fill this
-CHAT_ID = "6918721957"      # Fill this
+BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
+CHAT_ID = "6918721957"
 
 TIMEZONE = pytz.timezone("Africa/Lagos")
+
 DATA_DIR = "data"
 LOG_FILE = os.path.join(DATA_DIR, "trades.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -43,13 +43,22 @@ if not os.path.exists(LOG_FILE):
 def analyze_chart(image: Image):
 
     img = np.array(image.convert("L"))
+
     series = np.mean(img, axis=0)
     diff = np.diff(series)
+
     momentum = np.std(diff)
     bullish = np.sum(diff > 0)
     bearish = np.sum(diff < 0)
 
-    reason = []
+    # -------------------
+    # STRICT FILTER
+    # -------------------
+    if momentum < 0.8:
+        return "NO TRADE", None, None, ["Market too slow"]
+
+    if abs(bullish - bearish) < len(diff) * 0.1:
+        return "NO TRADE", None, None, ["Market choppy"]
 
     # -------------------
     # DIRECTION
@@ -57,7 +66,7 @@ def analyze_chart(image: Image):
     direction = "BUY" if bullish > bearish else "SELL"
 
     # -------------------
-    # ADAPTIVE DURATION
+    # DURATION (FIXED)
     # -------------------
     if momentum > 2.5:
         duration = 1
@@ -67,30 +76,22 @@ def analyze_chart(image: Image):
         duration = 5
 
     # -------------------
-    # ADAPTIVE ENTRY DELAY
+    # ENTRY DELAY
     # -------------------
-    entry_delay = 5 if momentum > 2 else 10
+    if momentum > 2:
+        entry_delay = 5
+    else:
+        entry_delay = 10
 
-    # -------------------
-    # SMART FILTERS
-    # -------------------
-    if momentum < 0.5:
-        reason.append("Market too slow")
-    if abs(bullish - bearish) < len(diff)*0.05:
-        reason.append("Market choppy")
-
+    reason = []
     reason.append("Bullish pressure" if direction=="BUY" else "Bearish pressure")
+    reason.append("Strong momentum" if momentum > 1.5 else "Moderate momentum")
     reason.append("Safe filtered trade")
-    reason.append("Adaptive entry & duration based on momentum")
-
-    # If only choppy or too slow, still try to suggest a trade (more realistic)
-    if "Market too slow" in reason or "Market choppy" in reason:
-        reason.append("Trade suggested despite warning")
 
     return direction, duration, entry_delay, reason
 
 # -------------------
-# UPDATE RESULT & LEARNING
+# SAVE RESULT
 # -------------------
 def update_result(result, direction):
     global loss_streak
@@ -98,7 +99,6 @@ def update_result(result, direction):
     with open(LOG_FILE, "a", newline="") as f:
         csv.writer(f).writerow([datetime.now(TIMEZONE), direction, "", result])
 
-    # Adaptive confidence learning
     if result == "WIN":
         confidence_bias[direction] = confidence_bias.get(direction, 0) + 0.02
         loss_streak = 0
@@ -107,7 +107,7 @@ def update_result(result, direction):
         loss_streak += 1
 
 # -------------------
-# TELEGRAM PHOTO HANDLER
+# TELEGRAM HANDLER
 # -------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -118,7 +118,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # -------------------
     # LOSS PROTECTION
     # -------------------
-    if loss_streak >= 3:
+    if loss_streak >= 2:
         await update.message.reply_text("🛑 Trading paused (loss protection). Wait.")
         return
 
@@ -126,30 +126,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # COOLDOWN
     # -------------------
     last = cooldown_tracker.get("global")
-    if last and (now - last).seconds < 60:
+    if last and (now - last).seconds < 120:
         await update.message.reply_text("⏳ Wait... market stabilizing.")
         return
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
+
     bio = BytesIO()
     await file.download_to_memory(bio)
     bio.seek(0)
+
     image = Image.open(bio)
 
     direction, duration, entry_delay, reason = analyze_chart(image)
 
+    if direction == "NO TRADE":
+        await update.message.reply_text("❌ No safe setup\nReason: " + reason[0])
+        return
+
     cooldown_tracker["global"] = now
 
     # -------------------
-    # BUILD MESSAGE
+    # BUILD MESSAGE (NO ERROR)
     # -------------------
     reason_text = "\n- ".join(reason)
+
     entry_time = datetime.now(TIMEZONE) + timedelta(seconds=entry_delay)
     entry_time_str = entry_time.strftime("%H:%M:%S")
 
     msg = (
-        "📊 FINAL SAFE SIGNAL\n\n"
+        "📊 SAFE SIGNAL\n\n"
         f"Direction: {direction}\n"
         f"Entry Time: {entry_time_str}\n"
         f"Duration: {duration} min\n\n"
@@ -170,20 +177,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-    try:
-        await query.answer()
-    except:
-        pass  # Ignore "query too old" errors
+    await query.answer()
 
     data = query.data.split("_")
     result = data[0]
     direction = data[1]
 
     update_result("WIN" if result=="win" else "LOSS", direction)
-    try:
-        await query.edit_message_text(f"Recorded: {result.upper()}")
-    except:
-        pass
+
+    await query.edit_message_text(f"Recorded: {result.upper()}")
 
 # -------------------
 # MAIN
@@ -191,10 +193,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     print("FINAL SAFE BOT RUNNING...")
+
     await app.run_polling()
 
 # -------------------
