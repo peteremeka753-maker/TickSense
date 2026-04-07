@@ -1,6 +1,6 @@
 # ======================================
 # V4.1 + V4 MERGED DERIV AI TRADING SYSTEM
-# FULL LIVE ENGINE + TELEGRAM + LEARNING + AUTO SYMBOLS
+# STABLE DEPLOY VERSION (FIXED EVENT LOOP)
 # ======================================
 
 import os
@@ -44,10 +44,9 @@ WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 tick_buffer = {}
 learning = {}
-pause_until = None
-cooldown = {}
-
 symbols = []
+
+cooldown = {}
 
 # =========================
 # LOAD LEARNING
@@ -65,7 +64,7 @@ def save_learning():
         json.dump(learning, f)
 
 # =========================
-# AUTO SYMBOL LOADER
+# SYMBOL LOADER
 # =========================
 
 async def load_symbols():
@@ -77,8 +76,7 @@ async def load_symbols():
             "product_type": "basic"
         }))
 
-        msg = await ws.recv()
-        data = json.loads(msg)
+        data = json.loads(await ws.recv())
 
         syms = []
 
@@ -125,7 +123,7 @@ async def stream_ticks():
                         buf.pop(0)
 
 # =========================
-# ANALYSIS ENGINE
+# ANALYSIS ENGINE (UNCHANGED)
 # =========================
 
 def tick_analysis(symbol):
@@ -185,7 +183,7 @@ def expiry(momentum, strength):
     return 5
 
 # =========================
-# TELEGRAM HANDLERS
+# HANDLERS
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,8 +192,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now = datetime.now(TIMEZONE)
 
-    if cooldown.get("global") and (now - cooldown["global"]).seconds < 60:
-        return
+    if cooldown.get("global"):
+        if (now - cooldown["global"]).seconds < 60:
+            return
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
@@ -231,25 +230,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# =========================
-# LEARNING SYSTEM
-# =========================
-
-def update_learning(symbol, direction, result):
-
-    if symbol not in learning:
-        learning[symbol] = {"BUY": 0.0, "SELL": 0.0}
-
-    if result == "WIN":
-        learning[symbol][direction] += 0.05
-    else:
-        learning[symbol][direction] -= 0.05
-
-    save_learning()
-
-# =========================
-# BUTTONS
-# =========================
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -258,33 +238,47 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result, symbol, direction = query.data.split("_")
 
-    update_learning(symbol, direction, "WIN" if result == "win" else "LOSS")
+    if symbol not in learning:
+        learning[symbol] = {"BUY": 0.0, "SELL": 0.0}
+
+    if result == "win":
+        learning[symbol][direction] += 0.05
+    else:
+        learning[symbol][direction] -= 0.05
+
+    save_learning()
 
     await query.edit_message_text(f"Recorded {result.upper()}")
 
 # =========================
-# MAIN START
+# BACKGROUND TASK
 # =========================
 
-async def main():
+async def start_background(app):
+    asyncio.create_task(stream_ticks())
+
+# =========================
+# MAIN (STABLE DEPLOY)
+# =========================
+
+def main():
 
     load_learning()
-    await load_symbols()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    asyncio.create_task(stream_ticks())
+    print("MERGED V4 SYSTEM RUNNING (STABLE VERSION)...")
 
-    print("MERGED V4 SYSTEM RUNNING...")
+    app.post_init = start_background
 
-    await app.run_polling()
+    app.run_polling()
 
 # =========================
 # START
 # =========================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
