@@ -13,81 +13,96 @@ CHAT_ID = "6918721957"
 
 DERIV_WS = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
+MIN_SCORE = 88
+MAX_SIGNALS_PER_HOUR = 3
+
+signal_history = []
+
 # =========================
-# TELEGRAM (GUARANTEED DELIVERY)
+# TELEGRAM (RELIABLE DELIVERY)
 # =========================
 def send_telegram(msg):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    for attempt in range(5):  # 🔁 TRY 5 TIMES
+    for attempt in range(5):
         try:
-            response = requests.post(
+            r = requests.post(
                 url,
                 data={"chat_id": CHAT_ID, "text": msg},
                 timeout=10
             )
 
-            if response.status_code == 200:
-                print("✅ TELEGRAM SENT")
+            if r.status_code == 200:
+                print("✅ SENT")
                 return True
 
-            else:
-                print(f"⚠️ TELEGRAM ERROR: {response.status_code}")
-
         except Exception as e:
-            print(f"❌ SEND FAILED (Attempt {attempt+1}):", e)
+            print(f"❌ Telegram error: {e}")
 
         time.sleep(2)
 
-    print("🚨 FAILED TO SEND AFTER 5 ATTEMPTS")
+    print("🚨 FAILED SEND")
     return False
 
+
 # =========================
-# CONFIDENCE ENGINE (UNCHANGED)
+# SCORING ENGINE (REALISTIC)
 # =========================
-def calculate_confidence(price, prev_price):
+def score_market(price, prev_price):
+
     change = abs(price - prev_price)
 
-    momentum = min(change * 100, 100)
-    stability = max(0, 100 - (change * 120))
+    momentum = min(change * 120, 100)
+    stability = max(0, 100 - (change * 150))
+    trend_strength = min(abs(price - prev_price) * 200, 100)
 
-    confidence = (momentum * 0.6) + (stability * 0.4)
+    score = (momentum * 0.4) + (stability * 0.3) + (trend_strength * 0.3)
 
-    return min(100, max(0, confidence))
+    return min(100, max(0, score))
+
 
 # =========================
-# SIGNAL FORMATTER (UNCHANGED)
+# SIGNAL FORMAT (UPDATED ONLY HERE)
 # =========================
-def build_signal(symbol, direction, confidence):
+def build_signal(symbol, direction, score):
+
     now = datetime.now()
 
+    # =========================
+    # MARTINGALE TIME SYSTEM (ADDED ONLY)
+    # =========================
     entry = now + timedelta(minutes=2)
     mg1 = now + timedelta(minutes=4)
     mg2 = now + timedelta(minutes=6)
     mg3 = now + timedelta(minutes=8)
 
     return f"""
-🚨 LIVE V9 PRO SIGNAL 🚨
+🚨 PRO V9 REAL ENGINE SIGNAL 🚨
 
 📊 Pair: {symbol}
 📈 Direction: {direction}
 
-🔥 Confidence: {round(confidence, 2)}%
+🔥 Score: {round(score, 2)}
 
-⏱ ENTRY: {entry.strftime('%H:%M:%S')}
+⏱ SIGNAL TIME: {now.strftime('%H:%M:%S')}
 
-🔁 MG1: {mg1.strftime('%H:%M:%S')}
-🔁 MG2: {mg2.strftime('%H:%M:%S')}
-🔁 MG3: {mg3.strftime('%H:%M:%S')}
+🎯 ENTRY: {entry.strftime('%H:%M:%S')}
 
-⚡ LIVE DERIV FRX STREAM
+🔁 MARTINGALE LEVELS:
+MG1 ➜ {mg1.strftime('%H:%M:%S')}
+MG2 ➜ {mg2.strftime('%H:%M:%S')}
+MG3 ➜ {mg3.strftime('%H:%M:%S')}
+
+⚡ DERIV FRX LIVE SYSTEM
 """
 
+
 # =========================
-# GET ALL FRX PAIRS
+# GET FRX SYMBOLS
 # =========================
-async def get_frx_symbols(ws):
+async def get_symbols(ws):
+
     await ws.send(json.dumps({
         "active_symbols": "brief",
         "product_type": "basic"
@@ -96,79 +111,98 @@ async def get_frx_symbols(ws):
     symbols = []
 
     while True:
-        response = await ws.recv()
-        data = json.loads(response)
+        data = json.loads(await ws.recv())
 
         if "active_symbols" in data:
             for item in data["active_symbols"]:
-                symbol = item["symbol"]
-
-                if symbol.startswith("frx"):
-                    symbols.append(symbol)
-
+                if item["symbol"].startswith("frx"):
+                    symbols.append(item["symbol"])
             break
 
     return symbols
 
+
 # =========================
-# STREAM MARKET (ALL FRX + AUTO RECONNECT)
+# SIGNAL LIMIT CHECK
 # =========================
-async def stream_market():
+def can_send_signal():
+
+    now = datetime.now()
+    one_hour_ago = now - timedelta(hours=1)
+
+    global signal_history
+    signal_history = [t for t in signal_history if t > one_hour_ago]
+
+    return len(signal_history) < MAX_SIGNALS_PER_HOUR
+
+
+def register_signal():
+    signal_history.append(datetime.now())
+
+
+# =========================
+# MAIN ENGINE
+# =========================
+async def stream():
 
     while True:
         try:
             async with websockets.connect(DERIV_WS) as ws:
 
-                print("🔄 CONNECTED TO DERIV")
+                print("🔄 CONNECTED")
 
-                symbols = await get_frx_symbols(ws)
+                symbols = await get_symbols(ws)
+                print(f"FRX LOADED: {len(symbols)}")
 
-                print(f"✅ FRX LOADED: {len(symbols)} pairs")
+                prev = {}
 
-                prev_price = {}
-
-                for symbol in symbols:
+                for s in symbols:
                     await ws.send(json.dumps({
-                        "ticks": symbol,
+                        "ticks": s,
                         "subscribe": 1
                     }))
 
-                print("🚀 LIVE FRX STREAM RUNNING...")
+                print("🚀 STREAM ACTIVE")
 
                 while True:
-                    data = await ws.recv()
-                    tick = json.loads(data)
 
-                    if "tick" not in tick:
+                    msg = await ws.recv()
+                    data = json.loads(msg)
+
+                    if "tick" not in data:
                         continue
 
-                    symbol = tick["tick"]["symbol"]
-                    price = float(tick["tick"]["quote"])
+                    symbol = data["tick"]["symbol"]
+                    price = float(data["tick"]["quote"])
 
-                    if symbol not in prev_price:
-                        prev_price[symbol] = price
+                    if symbol not in prev:
+                        prev[symbol] = price
                         continue
 
-                    confidence = calculate_confidence(price, prev_price[symbol])
+                    score = score_market(price, prev[symbol])
 
-                    direction = "BUY 📈" if price > prev_price[symbol] else "SELL 📉"
+                    direction = "BUY 📈" if price > prev[symbol] else "SELL 📉"
 
-                    if confidence >= 85:
-                        signal = build_signal(symbol, direction, confidence)
-                        send_telegram(signal)
+                    if score >= MIN_SCORE and can_send_signal():
 
-                    prev_price[symbol] = price
+                        signal = build_signal(symbol, direction, score)
+
+                        if send_telegram(signal):
+                            register_signal()
+
+                    prev[symbol] = price
 
         except Exception as e:
             print("❌ DISCONNECTED:", e)
-            print("🔁 RECONNECTING IN 5 SECONDS...")
+            print("🔁 RECONNECTING IN 5s...")
             await asyncio.sleep(5)
+
 
 # =========================
 # RUN
 # =========================
 async def main():
-    await stream_market()
+    await stream()
 
 if __name__ == "__main__":
     asyncio.run(main())
