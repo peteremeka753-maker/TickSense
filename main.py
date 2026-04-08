@@ -1,8 +1,8 @@
 # ======================================
-# V7 FUSION SYSTEM (BUY/SELL ONLY)
-# IMAGE + MARKET STREAM MERGE ENGINE
-# FRX + CRYPTO ONLY
-# NO NEUTRAL OUTPUT (FORCED DECISION)
+# V7.1 GLOBAL STREAM AI BOT
+# ALL FX + CRYPTO PARALLEL STREAM ENGINE
+# BUY / SELL ONLY (FORCED OUTPUT)
+# REAL 2-MIN EXPIRY ENGINE
 # ======================================
 
 import os
@@ -27,6 +27,7 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
+
 BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
@@ -37,16 +38,17 @@ active_trades = {}
 
 session = {"image": None, "symbol": None}
 
-tick_buffer = []
+# GLOBAL MULTI-STREAM STORAGE
+tick_map = {}
 symbols = []
-current_symbol = None
-stream_task = None
 
 # =========================
-# LOAD SYMBOLS
+# LOAD SYMBOLS (FX + CRYPTO)
 # =========================
+
 async def load_symbols():
     global symbols
+
     async with websockets.connect(WS_URL) as ws:
         await ws.send(json.dumps({
             "active_symbols": "full",
@@ -55,24 +57,28 @@ async def load_symbols():
 
         data = json.loads(await ws.recv())
 
-        filtered = []
+        result = []
         for item in data.get("active_symbols", []):
             s = item["symbol"]
+
             if s.startswith("frx"):
-                filtered.append(s.upper())
+                result.append(s.upper())
+
             elif "BTC" in s or "ETH" in s:
-                filtered.append(s.upper())
+                result.append(s.upper())
 
-        symbols = list(set(filtered))
-        print(f"Loaded {len(symbols)} symbols")
+        symbols = list(set(result))
+        print(f"STREAM READY: {len(symbols)} symbols")
 
 # =========================
-# LEARNING
+# LEARNING SYSTEM
 # =========================
+
 def load_learning():
     global learning
     if os.path.exists(DATA_FILE):
-        learning = json.load(open(DATA_FILE))
+        with open(DATA_FILE, "r") as f:
+            learning = json.load(f)
     else:
         learning = {}
 
@@ -81,10 +87,12 @@ def save_learning():
         json.dump(learning, f, indent=2)
 
 # =========================
-# STREAM ENGINE
+# GLOBAL STREAM ENGINE (ALL PAIRS)
 # =========================
+
 async def stream(symbol):
-    global tick_buffer, current_symbol
+    if symbol not in tick_map:
+        tick_map[symbol] = []
 
     while True:
         try:
@@ -94,32 +102,36 @@ async def stream(symbol):
                     "subscribe": 1
                 }))
 
-                current_symbol = symbol
-                tick_buffer = []
-
                 while True:
                     msg = await ws.recv()
                     data = json.loads(msg)
 
                     if "tick" in data:
                         price = float(data["tick"]["quote"])
-                        tick_buffer.append(price)
 
-                        if len(tick_buffer) > 100:
-                            tick_buffer.pop(0)
+                        tick_map[symbol].append(price)
+
+                        if len(tick_map[symbol]) > 100:
+                            tick_map[symbol].pop(0)
 
         except:
             await asyncio.sleep(2)
 
-async def switch_symbol(symbol):
-    global stream_task
-    if stream_task:
-        stream_task.cancel()
-    stream_task = asyncio.create_task(stream(symbol))
+# =========================
+# MARKET ANALYSIS (PER SYMBOL)
+# =========================
+
+def market_analysis(symbol):
+    if symbol not in tick_map or len(tick_map[symbol]) < 20:
+        return 0
+
+    diff = np.diff(tick_map[symbol][-20:])
+    return np.mean(diff)
 
 # =========================
-# IMAGE ANALYSIS (SYSTEM 1)
+# IMAGE ANALYSIS
 # =========================
+
 def image_analysis(image):
     img = np.array(image.convert("L"))
     series = np.mean(img, axis=0)
@@ -130,61 +142,52 @@ def image_analysis(image):
     up = np.sum(diff > 0)
     down = np.sum(diff < 0)
 
-    if up > down:
-        return "BUY", momentum
-    else:
-        return "SELL", momentum
+    return ("BUY" if up > down else "SELL"), momentum
 
 # =========================
-# MARKET ANALYSIS (SYSTEM 2)
+# DECISION ENGINE (FORCED BUY/SELL)
 # =========================
-def market_analysis():
-    if len(tick_buffer) < 20:
-        return 0
 
-    diff = np.diff(tick_buffer[-20:])
-    strength = np.mean(diff)
-
-    return strength
-
-# =========================
-# FINAL DECISION ENGINE (NO NEUTRAL)
-# =========================
 def decision(img_dir, market_strength, momentum):
     score = 0
 
-    # image bias
     if img_dir == "BUY":
         score += 2
     else:
         score -= 2
 
-    # market bias
     if market_strength > 0:
         score += 1
     else:
         score -= 1
 
-    # momentum weight
-    score += (momentum / 30)
+    score += momentum / 30
 
-    # FORCE OUTPUT (NO NEUTRAL)
-    if score >= 0:
-        return "BUY", score
-    else:
-        return "SELL", score
+    return ("BUY" if score >= 0 else "SELL"), score
+
+# =========================
+# TIME ENGINE (REAL 2 MIN)
+# =========================
+
+def get_times():
+    now = datetime.now(TIMEZONE)
+    expiry = now + timedelta(minutes=2)
+    return now, expiry
 
 # =========================
 # PROCESS SIGNAL
 # =========================
+
 async def process_signal(update):
     symbol = session["symbol"]
     image = session["image"]
 
     img_dir, momentum = image_analysis(image)
-    market_strength = market_analysis()
+    market_strength = market_analysis(symbol)
 
     final, score = decision(img_dir, market_strength, momentum)
+
+    now, expiry = get_times()
 
     trade_id = f"{symbol}_{datetime.now().timestamp()}"
 
@@ -194,13 +197,12 @@ async def process_signal(update):
     }
 
     msg = (
-        f"AI SIGNAL\n\n"
+        f"AI SIGNAL SYSTEM\n\n"
         f"PAIR: {symbol}\n"
         f"DIRECTION: {final}\n"
         f"CONFIDENCE: {round(score,2)}\n\n"
-        f"TIME: {datetime.now(TIMEZONE).strftime('%H:%M:%S')}\n"
-        f"EXPIRY: 2 MINUTES\n"
-        f"STREAM: {current_symbol}"
+        f"ENTRY: {now.strftime('%H:%M:%S')}\n"
+        f"EXPIRY: {expiry.strftime('%H:%M:%S')} (2 MIN)\n"
     )
 
     keyboard = [[
@@ -216,6 +218,7 @@ async def process_signal(update):
 # =========================
 # HANDLERS
 # =========================
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await photo.get_file()
@@ -240,7 +243,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     session["symbol"] = symbol
-    await switch_symbol(symbol)
 
     if not session["image"]:
         await update.message.reply_text("Send screenshot")
@@ -249,8 +251,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_signal(update)
 
 # =========================
-# CALLBACK
+# CALLBACK BUTTONS
 # =========================
+
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -276,19 +279,22 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_learning()
     del active_trades[trade_id]
 
-    await query.edit_message_text(f"{result.upper()} saved")
+    await query.edit_message_text(f"{result.upper()} recorded")
 
 # =========================
-# START
+# START ALL STREAMS
 # =========================
+
 async def start(app):
     await load_symbols()
-    if symbols:
-        await switch_symbol(symbols[0])
+
+    for s in symbols:
+        asyncio.create_task(stream(s))
 
 # =========================
 # MAIN
 # =========================
+
 def main():
     load_learning()
 
@@ -300,7 +306,7 @@ def main():
 
     app.post_init = start
 
-    print("V7 FUSION RUNNING (BUY/SELL ONLY)")
+    print("V7.1 GLOBAL STREAM RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":
