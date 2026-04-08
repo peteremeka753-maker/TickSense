@@ -2,6 +2,7 @@ import asyncio
 import json
 import websockets
 import requests
+import time
 from datetime import datetime, timedelta
 
 # =========================
@@ -13,11 +14,34 @@ CHAT_ID = "6918721957"
 DERIV_WS = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 # =========================
-# TELEGRAM
+# TELEGRAM (GUARANTEED DELIVERY)
 # =========================
 def send_telegram(msg):
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+
+    for attempt in range(5):  # 🔁 TRY 5 TIMES
+        try:
+            response = requests.post(
+                url,
+                data={"chat_id": CHAT_ID, "text": msg},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                print("✅ TELEGRAM SENT")
+                return True
+
+            else:
+                print(f"⚠️ TELEGRAM ERROR: {response.status_code}")
+
+        except Exception as e:
+            print(f"❌ SEND FAILED (Attempt {attempt+1}):", e)
+
+        time.sleep(2)
+
+    print("🚨 FAILED TO SEND AFTER 5 ATTEMPTS")
+    return False
 
 # =========================
 # CONFIDENCE ENGINE (UNCHANGED)
@@ -87,11 +111,11 @@ async def get_frx_symbols(ws):
     return symbols
 
 # =========================
-# MAIN STREAM WITH AUTO RECONNECT
+# STREAM MARKET (ALL FRX + AUTO RECONNECT)
 # =========================
 async def stream_market():
 
-    while True:  # 🔁 AUTO RECONNECT LOOP
+    while True:
         try:
             async with websockets.connect(DERIV_WS) as ws:
 
@@ -103,7 +127,6 @@ async def stream_market():
 
                 prev_price = {}
 
-                # subscribe to ALL FRX
                 for symbol in symbols:
                     await ws.send(json.dumps({
                         "ticks": symbol,
