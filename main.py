@@ -61,7 +61,7 @@ def build_signal(symbol, direction, confidence):
 """
 
 # =========================
-# GET ALL FRX PAIRS FROM DERIV
+# GET ALL FRX PAIRS
 # =========================
 async def get_frx_symbols(ws):
     await ws.send(json.dumps({
@@ -79,7 +79,6 @@ async def get_frx_symbols(ws):
             for item in data["active_symbols"]:
                 symbol = item["symbol"]
 
-                # ONLY FX (FRX)
                 if symbol.startswith("frx"):
                     symbols.append(symbol)
 
@@ -88,52 +87,59 @@ async def get_frx_symbols(ws):
     return symbols
 
 # =========================
-# WEBSOCKET STREAM (ALL FRX)
+# MAIN STREAM WITH AUTO RECONNECT
 # =========================
 async def stream_market():
-    async with websockets.connect(DERIV_WS) as ws:
 
-        print("LOADING FRX SYMBOLS...")
+    while True:  # 🔁 AUTO RECONNECT LOOP
+        try:
+            async with websockets.connect(DERIV_WS) as ws:
 
-        symbols = await get_frx_symbols(ws)
+                print("🔄 CONNECTED TO DERIV")
 
-        print(f"FRX SYMBOLS LOADED: {len(symbols)} pairs")
+                symbols = await get_frx_symbols(ws)
 
-        prev_price = {}
+                print(f"✅ FRX LOADED: {len(symbols)} pairs")
 
-        # subscribe to all FRX ticks
-        for symbol in symbols:
-            await ws.send(json.dumps({
-                "ticks": symbol,
-                "subscribe": 1
-            }))
+                prev_price = {}
 
-        print("LIVE FRX STREAM STARTED...")
+                # subscribe to ALL FRX
+                for symbol in symbols:
+                    await ws.send(json.dumps({
+                        "ticks": symbol,
+                        "subscribe": 1
+                    }))
 
-        while True:
-            data = await ws.recv()
-            tick = json.loads(data)
+                print("🚀 LIVE FRX STREAM RUNNING...")
 
-            if "tick" not in tick:
-                continue
+                while True:
+                    data = await ws.recv()
+                    tick = json.loads(data)
 
-            symbol = tick["tick"]["symbol"]
-            price = float(tick["tick"]["quote"])
+                    if "tick" not in tick:
+                        continue
 
-            if symbol not in prev_price:
-                prev_price[symbol] = price
-                continue
+                    symbol = tick["tick"]["symbol"]
+                    price = float(tick["tick"]["quote"])
 
-            confidence = calculate_confidence(price, prev_price[symbol])
+                    if symbol not in prev_price:
+                        prev_price[symbol] = price
+                        continue
 
-            direction = "BUY 📈" if price > prev_price[symbol] else "SELL 📉"
+                    confidence = calculate_confidence(price, prev_price[symbol])
 
-            # ONLY SEND HIGH CONFIDENCE
-            if confidence >= 85:
-                signal = build_signal(symbol, direction, confidence)
-                send_telegram(signal)
+                    direction = "BUY 📈" if price > prev_price[symbol] else "SELL 📉"
 
-            prev_price[symbol] = price
+                    if confidence >= 85:
+                        signal = build_signal(symbol, direction, confidence)
+                        send_telegram(signal)
+
+                    prev_price[symbol] = price
+
+        except Exception as e:
+            print("❌ DISCONNECTED:", e)
+            print("🔁 RECONNECTING IN 5 SECONDS...")
+            await asyncio.sleep(5)
 
 # =========================
 # RUN
