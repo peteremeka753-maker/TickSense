@@ -1,7 +1,6 @@
 # ======================================
-# FIXED AI SIGNAL BOT V6 (REAL FIXED)
-# SCREENSHOT + MANUAL PAIR + DERIV WS
-# 2-MIN EXPIRY SYSTEM (STRICT)
+# V6 FINAL FIXED (FRX + CRYPTO ONLY)
+# REAL STREAM + WAIT SYSTEM + 2MIN EXPIRY
 # ======================================
 
 import os
@@ -24,10 +23,6 @@ from telegram.ext import (
     filters
 )
 
-# =========================
-# CONFIG
-# =========================
-
 BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
 TIMEZONE = pytz.timezone("Africa/Lagos")
 WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
@@ -37,17 +32,42 @@ DATA_FILE = "learning.json"
 learning = {}
 active_trades = {}
 
-# =========================
-# SESSION STATE
-# =========================
-
-session = {
-    "image": None,
-    "symbol": None
-}
+session = {"image": None, "symbol": None}
 
 tick_buffer = []
+symbols = []
+current_symbol = None
 stream_task = None
+
+# =========================
+# LOAD SYMBOLS (REAL FIX)
+# =========================
+
+async def load_symbols():
+    global symbols
+
+    async with websockets.connect(WS_URL) as ws:
+        await ws.send(json.dumps({
+            "active_symbols": "full",
+            "product_type": "basic"
+        }))
+
+        data = json.loads(await ws.recv())
+
+        filtered = []
+
+        for item in data.get("active_symbols", []):
+            s = item["symbol"]
+
+            if s.startswith("frx"):
+                filtered.append(s.upper())
+
+            elif "BTC" in s or "ETH" in s:
+                filtered.append(s.upper())
+
+        symbols = list(set(filtered))
+
+        print(f"✅ Loaded {len(symbols)} FRX/CRYPTO symbols")
 
 # =========================
 # LOAD / SAVE
@@ -65,11 +85,54 @@ def save_learning():
         json.dump(learning, f, indent=2)
 
 # =========================
-# TRADE ID
+# STREAM ENGINE
 # =========================
 
-def create_trade_id(symbol):
-    return f"{symbol}_{datetime.now().timestamp()}"
+async def deriv_stream(symbol):
+
+    global tick_buffer, current_symbol
+
+    while True:
+        try:
+            async with websockets.connect(WS_URL) as ws:
+
+                await ws.send(json.dumps({
+                    "ticks": symbol,
+                    "subscribe": 1
+                }))
+
+                current_symbol = symbol
+                tick_buffer = []
+
+                print(f"📡 Streaming: {symbol}")
+
+                while True:
+                    msg = await ws.recv()
+                    data = json.loads(msg)
+
+                    if "tick" in data:
+                        price = float(data["tick"]["quote"])
+                        tick_buffer.append(price)
+
+                        if len(tick_buffer) > 100:
+                            tick_buffer.pop(0)
+
+        except Exception as e:
+            print("⚠️ Reconnecting...", e)
+            await asyncio.sleep(2)
+
+# =========================
+# SWITCH STREAM
+# =========================
+
+async def switch_symbol(symbol):
+
+    global stream_task
+
+    if stream_task:
+        stream_task.cancel()
+
+    stream_task = asyncio.create_task(deriv_stream(symbol))
 
 # =========================
 # IMAGE ANALYSIS
@@ -86,51 +149,22 @@ def image_analysis(image):
     up = np.sum(diff > 0)
     down = np.sum(diff < 0)
 
-    if abs(up - down) < len(diff) * 0.1:
-        return "NEUTRAL", momentum
-
-    direction = "BUY" if up > down else "SELL"
+    if up > down:
+        direction = "BUY"
+    elif down > up:
+        direction = "SELL"
+    else:
+        direction = "NEUTRAL"
 
     return direction, momentum
 
 # =========================
-# DERIV STREAM
-# =========================
-
-async def deriv_stream(symbol):
-
-    global tick_buffer
-    tick_buffer = []
-
-    try:
-        async with websockets.connect(WS_URL) as ws:
-
-            await ws.send(json.dumps({
-                "ticks": symbol,
-                "subscribe": 1
-            }))
-
-            while True:
-                msg = await ws.recv()
-                data = json.loads(msg)
-
-                if "tick" in data:
-                    price = float(data["tick"]["quote"])
-                    tick_buffer.append(price)
-
-                    if len(tick_buffer) > 100:
-                        tick_buffer.pop(0)
-
-    except Exception as e:
-        print("WebSocket error:", e)
-
-# =========================
-# MARKET ANALYSIS
+# MARKET ANALYSIS (ONLY FIXED PART)
 # =========================
 
 def market_analysis():
 
-    if len(tick_buffer) < 15:
+    if len(tick_buffer) < 20:
         return "NEUTRAL", 0
 
     diff = np.diff(tick_buffer[-20:])
@@ -139,17 +173,20 @@ def market_analysis():
     if abs(strength) < 0.00001:
         return "NEUTRAL", 0
 
-    direction = "BUY" if strength > 0 else "SELL"
-
-    return direction, abs(strength)
+    # ✅ ONLY FIXED LINE BELOW (BUY/SELL BALANCE FIX)
+    if strength > 0.000002:
+        return "BUY", abs(strength)
+    elif strength < -0.000002:
+        return "SELL", abs(strength)
+    else:
+        return "NEUTRAL", 0
 
 # =========================
 # TIME ENGINE
 # =========================
 
 def entry_time():
-    now = datetime.now(TIMEZONE)
-    return now + timedelta(minutes=2)
+    return datetime.now(TIMEZONE) + timedelta(minutes=2)
 
 # =========================
 # DECISION ENGINE
@@ -157,73 +194,22 @@ def entry_time():
 
 def decision(img_dir, mkt_dir, momentum, strength):
 
-    if mkt_dir == "NEUTRAL":
-        return img_dir, momentum
-
     score = 0
 
     if img_dir == mkt_dir:
         score += 2
-    else:
+    elif mkt_dir != "NEUTRAL":
         score -= 1
 
-    score += strength
-    score += momentum / 50
+    score += strength * 10
+    score += momentum / 30
 
-    final = img_dir if score >= 1 else mkt_dir
-
-    return final, score
-
-# =========================
-# PHOTO HANDLER
-# =========================
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-
-    bio = BytesIO()
-    await file.download_to_memory(bio)
-    bio.seek(0)
-
-    image = Image.open(bio)
-
-    session["image"] = image
-
-    if not session["symbol"]:
-        await update.message.reply_text("📌 Send currency pair first (e.g. frxEURUSD)")
-        return
-
-    await update.message.reply_text("📊 Screenshot received. Processing...")
-
-    await process_signal(update)
-
-# =========================
-# TEXT HANDLER
-# =========================
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    global stream_task
-
-    text = update.message.text.strip()
-
-    session["symbol"] = text
-
-    # 🔥 START REAL STREAM HERE
-    if stream_task:
-        stream_task.cancel()
-
-    stream_task = asyncio.create_task(deriv_stream(text))
-
-    if not session["image"]:
-        await update.message.reply_text("📸 Send chart screenshot first")
-        return
-
-    await update.message.reply_text(f"📌 Pair set: {text}\nAnalyzing...")
-
-    await process_signal(update)
+    if score > 1:
+        return img_dir, score
+    elif score < -1:
+        return mkt_dir, score
+    else:
+        return (mkt_dir if mkt_dir != "NEUTRAL" else img_dir), score
 
 # =========================
 # PROCESS SIGNAL
@@ -239,11 +225,7 @@ async def process_signal(update):
 
     final, score = decision(img_dir, mkt_dir, momentum, strength)
 
-    if final == "NEUTRAL":
-        await update.message.reply_text("⚠️ Market unclear. No trade.")
-        return
-
-    trade_id = create_trade_id(symbol)
+    trade_id = f"{symbol}_{datetime.now().timestamp()}"
 
     active_trades[trade_id] = {
         "symbol": symbol,
@@ -251,13 +233,13 @@ async def process_signal(update):
     }
 
     msg = (
-        f"📊 AI SIGNAL SYSTEM (V6 FIXED)\n\n"
+        f"📊 AI SIGNAL\n\n"
         f"PAIR: {symbol}\n"
         f"DIRECTION: {final}\n"
         f"CONFIDENCE: {round(score,2)}\n\n"
-        f"ENTRY TIME: {entry_time().strftime('%H:%M:%S')}\n"
+        f"ENTRY: {entry_time().strftime('%H:%M:%S')}\n"
         f"EXPIRY: 2 MINUTES\n"
-        f"TRADE ID: {trade_id}"
+        f"STREAM: {current_symbol}"
     )
 
     keyboard = [[
@@ -271,7 +253,46 @@ async def process_signal(update):
     session["symbol"] = None
 
 # =========================
-# BUTTON HANDLER
+# HANDLERS
+# =========================
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+
+    bio = BytesIO()
+    await file.download_to_memory(bio)
+    bio.seek(0)
+
+    session["image"] = Image.open(bio)
+
+    if not session["symbol"]:
+        await update.message.reply_text("📌 Send pair first (e.g. frxEURUSD)")
+        return
+
+    await process_signal(update)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    symbol = update.message.text.strip().upper()
+
+    if symbol not in symbols:
+        await update.message.reply_text("❌ Invalid pair (FRX/CRYPTO only)")
+        return
+
+    session["symbol"] = symbol
+
+    await switch_symbol(symbol)
+
+    if not session["image"]:
+        await update.message.reply_text(f"📡 Pair set: {symbol}\nSend screenshot")
+        return
+
+    await process_signal(update)
+
+# =========================
+# BUTTONS
 # =========================
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -284,7 +305,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trade = active_trades.get(trade_id)
 
     if not trade:
-        await query.edit_message_text("Trade not found")
+        await query.edit_message_text("Trade expired")
         return
 
     symbol = trade["symbol"]
@@ -304,6 +325,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"{result.upper()} recorded ✔")
 
 # =========================
+# START BACKGROUND
+# =========================
+
+async def start_background(app):
+
+    await load_symbols()
+
+    if symbols:
+        await switch_symbol(symbols[0])
+
+# =========================
 # MAIN
 # =========================
 
@@ -317,7 +349,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(buttons))
 
-    print("V6 REAL FIX RUNNING...")
+    app.post_init = start_background
+
+    print("🚀 V6 FIXED (FRX + CRYPTO ONLY RUNNING)")
 
     app.run_polling()
 
