@@ -1,6 +1,6 @@
 # ======================================
-# V6 FINAL FIXED (FRX + CRYPTO ONLY)
-# REAL STREAM + WAIT SYSTEM + 2MIN EXPIRY
+# V5 + V6 MERGED AI TRADING SYSTEM
+# BUY + SELL SYSTEM FUSION ENGINE
 # ======================================
 
 import os
@@ -32,45 +32,10 @@ DATA_FILE = "learning.json"
 learning = {}
 active_trades = {}
 
-session = {"image": None, "symbol": None}
-
 tick_buffer = []
-symbols = []
-current_symbol = None
-stream_task = None
 
 # =========================
-# LOAD SYMBOLS (REAL FIX)
-# =========================
-
-async def load_symbols():
-    global symbols
-
-    async with websockets.connect(WS_URL) as ws:
-        await ws.send(json.dumps({
-            "active_symbols": "full",
-            "product_type": "basic"
-        }))
-
-        data = json.loads(await ws.recv())
-
-        filtered = []
-
-        for item in data.get("active_symbols", []):
-            s = item["symbol"]
-
-            if s.startswith("frx"):
-                filtered.append(s.upper())
-
-            elif "BTC" in s or "ETH" in s:
-                filtered.append(s.upper())
-
-        symbols = list(set(filtered))
-
-        print(f"✅ Loaded {len(symbols)} FRX/CRYPTO symbols")
-
-# =========================
-# LOAD / SAVE
+# LOAD LEARNING
 # =========================
 
 def load_learning():
@@ -85,57 +50,14 @@ def save_learning():
         json.dump(learning, f, indent=2)
 
 # =========================
-# STREAM ENGINE
+# TRADE ID
 # =========================
 
-async def deriv_stream(symbol):
-
-    global tick_buffer, current_symbol
-
-    while True:
-        try:
-            async with websockets.connect(WS_URL) as ws:
-
-                await ws.send(json.dumps({
-                    "ticks": symbol,
-                    "subscribe": 1
-                }))
-
-                current_symbol = symbol
-                tick_buffer = []
-
-                print(f"📡 Streaming: {symbol}")
-
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
-
-                    if "tick" in data:
-                        price = float(data["tick"]["quote"])
-                        tick_buffer.append(price)
-
-                        if len(tick_buffer) > 100:
-                            tick_buffer.pop(0)
-
-        except Exception as e:
-            print("⚠️ Reconnecting...", e)
-            await asyncio.sleep(2)
+def trade_id(symbol):
+    return f"{symbol}_{datetime.now().timestamp()}"
 
 # =========================
-# SWITCH STREAM
-# =========================
-
-async def switch_symbol(symbol):
-
-    global stream_task
-
-    if stream_task:
-        stream_task.cancel()
-
-    stream_task = asyncio.create_task(deriv_stream(symbol))
-
-# =========================
-# IMAGE ANALYSIS
+# IMAGE ANALYSIS (SYSTEM 1 + SYSTEM 2 COMBINED)
 # =========================
 
 def image_analysis(image):
@@ -149,111 +71,90 @@ def image_analysis(image):
     up = np.sum(diff > 0)
     down = np.sum(diff < 0)
 
-    if up > down:
-        direction = "BUY"
-    elif down > up:
-        direction = "SELL"
-    else:
-        direction = "NEUTRAL"
+    # SYSTEM 1 STYLE
+    direction_1 = "BUY" if up > down else "SELL"
 
-    return direction, momentum
+    # SYSTEM 2 STYLE
+    if up > down:
+        direction_2 = "BUY"
+    elif down > up:
+        direction_2 = "SELL"
+    else:
+        direction_2 = "NEUTRAL"
+
+    return direction_1, direction_2, momentum
 
 # =========================
-# MARKET ANALYSIS (ONLY FIXED PART)
+# MARKET ANALYSIS (SYSTEM 1 + SYSTEM 2 COMBINED)
 # =========================
 
 def market_analysis():
 
-    if len(tick_buffer) < 20:
-        return "NEUTRAL", 0
+    if len(tick_buffer) < 10:
+        return "BUY", "NEUTRAL", 0.5
 
-    diff = np.diff(tick_buffer[-20:])
+    diff = np.diff(tick_buffer[-10:])
     strength = np.mean(diff)
 
+    # SYSTEM 1 STYLE
+    direction_1 = ("BUY", abs(strength)) if strength > 0 else ("SELL", abs(strength))
+
+    # SYSTEM 2 STYLE
     if abs(strength) < 0.00001:
-        return "NEUTRAL", 0
-
-    # ✅ ONLY FIXED LINE BELOW (BUY/SELL BALANCE FIX)
-    if strength > 0.000002:
-        return "BUY", abs(strength)
-    elif strength < -0.000002:
-        return "SELL", abs(strength)
+        direction_2 = "NEUTRAL"
     else:
-        return "NEUTRAL", 0
+        direction_2 = "BUY" if strength > 0 else "SELL"
+
+    return direction_1[0], direction_2, direction_1[1]
 
 # =========================
-# TIME ENGINE
+# FINAL FUSION ENGINE (NEW)
 # =========================
 
-def entry_time():
-    return datetime.now(TIMEZONE) + timedelta(minutes=2)
+def fusion_decision(img1, img2, mkt1, mkt2, momentum, strength):
 
-# =========================
-# DECISION ENGINE
-# =========================
+    score_buy = 0
+    score_sell = 0
 
-def decision(img_dir, mkt_dir, momentum, strength):
+    # image system vote
+    if img1 == "BUY":
+        score_buy += 1
+    elif img1 == "SELL":
+        score_sell += 1
 
-    score = 0
+    if img2 == "BUY":
+        score_buy += 1
+    elif img2 == "SELL":
+        score_sell += 1
 
-    if img_dir == mkt_dir:
-        score += 2
-    elif mkt_dir != "NEUTRAL":
-        score -= 1
+    # market system vote
+    if mkt1 == "BUY":
+        score_buy += 1
+    elif mkt1 == "SELL":
+        score_sell += 1
 
-    score += strength * 10
-    score += momentum / 30
+    if mkt2 == "BUY":
+        score_buy += 1
+    elif mkt2 == "SELL":
+        score_sell += 1
 
-    if score > 1:
-        return img_dir, score
-    elif score < -1:
-        return mkt_dir, score
+    # momentum weighting
+    score_buy += momentum / 50
+    score_sell += momentum / 50
+
+    # strength weighting
+    score_buy += strength
+    score_sell += strength
+
+    if score_buy > score_sell:
+        return "BUY", score_buy, score_sell
+    elif score_sell > score_buy:
+        return "SELL", score_buy, score_sell
     else:
-        return (mkt_dir if mkt_dir != "NEUTRAL" else img_dir), score
+        return "NEUTRAL", score_buy, score_sell
 
 # =========================
-# PROCESS SIGNAL
-# =========================
-
-async def process_signal(update):
-
-    symbol = session["symbol"]
-    image = session["image"]
-
-    img_dir, momentum = image_analysis(image)
-    mkt_dir, strength = market_analysis()
-
-    final, score = decision(img_dir, mkt_dir, momentum, strength)
-
-    trade_id = f"{symbol}_{datetime.now().timestamp()}"
-
-    active_trades[trade_id] = {
-        "symbol": symbol,
-        "direction": final
-    }
-
-    msg = (
-        f"📊 AI SIGNAL\n\n"
-        f"PAIR: {symbol}\n"
-        f"DIRECTION: {final}\n"
-        f"CONFIDENCE: {round(score,2)}\n\n"
-        f"ENTRY: {entry_time().strftime('%H:%M:%S')}\n"
-        f"EXPIRY: 2 MINUTES\n"
-        f"STREAM: {current_symbol}"
-    )
-
-    keyboard = [[
-        InlineKeyboardButton("WIN", callback_data=f"win|{trade_id}"),
-        InlineKeyboardButton("LOSS", callback_data=f"loss|{trade_id}")
-    ]]
-
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
-
-    session["image"] = None
-    session["symbol"] = None
-
-# =========================
-# HANDLERS
+# PHOTO HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,34 +166,40 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_memory(bio)
     bio.seek(0)
 
-    session["image"] = Image.open(bio)
+    image = Image.open(bio)
 
-    if not session["symbol"]:
-        await update.message.reply_text("📌 Send pair first (e.g. frxEURUSD)")
-        return
+    img1, img2, momentum = image_analysis(image)
+    mkt1, mkt2, strength = market_analysis()
 
-    await process_signal(update)
+    final, sb, ss = fusion_decision(img1, img2, mkt1, mkt2, momentum, strength)
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol = "USDCHF"
+    t_id = trade_id(symbol)
 
-    symbol = update.message.text.strip().upper()
+    active_trades[t_id] = {
+        "symbol": symbol,
+        "direction": final
+    }
 
-    if symbol not in symbols:
-        await update.message.reply_text("❌ Invalid pair (FRX/CRYPTO only)")
-        return
+    msg = (
+        f"📊 MERGED AI SIGNAL\n\n"
+        f"PAIR: {symbol}\n"
+        f"FINAL: {final}\n"
+        f"BUY SCORE: {round(sb,2)}\n"
+        f"SELL SCORE: {round(ss,2)}\n"
+        f"ENTRY: {datetime.now().strftime('%H:%M:%S')}\n"
+        f"EXPIRY: 2 MINUTES\n"
+    )
 
-    session["symbol"] = symbol
+    keyboard = [[
+        InlineKeyboardButton("WIN", callback_data=f"win|{t_id}"),
+        InlineKeyboardButton("LOSS", callback_data=f"loss|{t_id}")
+    ]]
 
-    await switch_symbol(symbol)
-
-    if not session["image"]:
-        await update.message.reply_text(f"📡 Pair set: {symbol}\nSend screenshot")
-        return
-
-    await process_signal(update)
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =========================
-# BUTTONS
+# WIN / LOSS
 # =========================
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -300,12 +207,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    result, trade_id = query.data.split("|")
+    result, t_id = query.data.split("|")
 
-    trade = active_trades.get(trade_id)
+    trade = active_trades.get(t_id)
 
     if not trade:
-        await query.edit_message_text("Trade expired")
+        await query.edit_message_text("Trade not found")
         return
 
     symbol = trade["symbol"]
@@ -320,20 +227,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         learning[symbol][direction] -= 1
 
     save_learning()
-    del active_trades[trade_id]
+    del active_trades[t_id]
 
     await query.edit_message_text(f"{result.upper()} recorded ✔")
-
-# =========================
-# START BACKGROUND
-# =========================
-
-async def start_background(app):
-
-    await load_symbols()
-
-    if symbols:
-        await switch_symbol(symbols[0])
 
 # =========================
 # MAIN
@@ -346,12 +242,9 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(buttons))
 
-    app.post_init = start_background
-
-    print("🚀 V6 FIXED (FRX + CRYPTO ONLY RUNNING)")
+    print("🚀 MERGED BUY + SELL SYSTEM RUNNING")
 
     app.run_polling()
 
