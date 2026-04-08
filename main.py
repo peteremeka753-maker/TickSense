@@ -10,12 +10,7 @@ from datetime import datetime, timedelta
 TELEGRAM_BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
 CHAT_ID = "6918721957"
 
-CRYPTO_WS = "wss://stream.binance.com:9443/ws"
-
-SYMBOLS = {
-    "btcusdt@trade": "BTCUSD",
-    "ethusdt@trade": "ETHUSD"
-}
+DERIV_WS = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 # =========================
 # TELEGRAM
@@ -25,7 +20,7 @@ def send_telegram(msg):
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 # =========================
-# CONFIDENCE ENGINE (REAL SIGNAL FILTER)
+# CONFIDENCE ENGINE (UNCHANGED)
 # =========================
 def calculate_confidence(price, prev_price):
     change = abs(price - prev_price)
@@ -38,7 +33,7 @@ def calculate_confidence(price, prev_price):
     return min(100, max(0, confidence))
 
 # =========================
-# SIGNAL FORMATTER
+# SIGNAL FORMATTER (UNCHANGED)
 # =========================
 def build_signal(symbol, direction, confidence):
     now = datetime.now()
@@ -62,40 +57,83 @@ def build_signal(symbol, direction, confidence):
 🔁 MG2: {mg2.strftime('%H:%M:%S')}
 🔁 MG3: {mg3.strftime('%H:%M:%S')}
 
-⚡ LIVE WEBSOCKET STREAM
+⚡ LIVE DERIV FRX STREAM
 """
 
 # =========================
-# WEBSOCKET STREAM
+# GET ALL FRX PAIRS FROM DERIV
+# =========================
+async def get_frx_symbols(ws):
+    await ws.send(json.dumps({
+        "active_symbols": "brief",
+        "product_type": "basic"
+    }))
+
+    symbols = []
+
+    while True:
+        response = await ws.recv()
+        data = json.loads(response)
+
+        if "active_symbols" in data:
+            for item in data["active_symbols"]:
+                symbol = item["symbol"]
+
+                # ONLY FX (FRX)
+                if symbol.startswith("frx"):
+                    symbols.append(symbol)
+
+            break
+
+    return symbols
+
+# =========================
+# WEBSOCKET STREAM (ALL FRX)
 # =========================
 async def stream_market():
-    url = f"{CRYPTO_WS}/btcusdt@trade"
+    async with websockets.connect(DERIV_WS) as ws:
 
-    prev_price = None
+        print("LOADING FRX SYMBOLS...")
 
-    async with websockets.connect(url) as ws:
-        print("LIVE STREAM STARTED...")
+        symbols = await get_frx_symbols(ws)
+
+        print(f"FRX SYMBOLS LOADED: {len(symbols)} pairs")
+
+        prev_price = {}
+
+        # subscribe to all FRX ticks
+        for symbol in symbols:
+            await ws.send(json.dumps({
+                "ticks": symbol,
+                "subscribe": 1
+            }))
+
+        print("LIVE FRX STREAM STARTED...")
 
         while True:
             data = await ws.recv()
             tick = json.loads(data)
 
-            price = float(tick["p"])
-
-            if prev_price is None:
-                prev_price = price
+            if "tick" not in tick:
                 continue
 
-            confidence = calculate_confidence(price, prev_price)
+            symbol = tick["tick"]["symbol"]
+            price = float(tick["tick"]["quote"])
 
-            direction = "BUY 📈" if price > prev_price else "SELL 📉"
+            if symbol not in prev_price:
+                prev_price[symbol] = price
+                continue
 
-            # ONLY SEND 85%+
+            confidence = calculate_confidence(price, prev_price[symbol])
+
+            direction = "BUY 📈" if price > prev_price[symbol] else "SELL 📉"
+
+            # ONLY SEND HIGH CONFIDENCE
             if confidence >= 85:
-                signal = build_signal("BTCUSD", direction, confidence)
+                signal = build_signal(symbol, direction, confidence)
                 send_telegram(signal)
 
-            prev_price = price
+            prev_price[symbol] = price
 
 # =========================
 # RUN
