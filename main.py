@@ -1,332 +1,248 @@
-# ======================================
-# V6 FINAL FIXED (AUTO TICKS + PAIR SWITCH)
-# REAL STREAM + WAIT SYSTEM + 2MIN EXPIRY
-# ======================================
+# AI TRADER SIGNAL SYSTEM - REAL MONEY READY
 
 import os
+import csv
 import json
 import asyncio
-import numpy as np
 import websockets
-from io import BytesIO
+import numpy as np
 from datetime import datetime, timedelta
-
 import pytz
-from PIL import Image
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
-# =========================
+# -------------------
 # CONFIG
-# =========================
-
+# -------------------
 BOT_TOKEN = "8783779196:AAGNldYhsoISW8GO21gVL9FSHcpsUj4Of6o"
+CHAT_ID = "6918721957"
+DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
 TIMEZONE = pytz.timezone("Africa/Lagos")
-WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+DATA_DIR = "data"
+LOG_FILE = os.path.join(DATA_DIR, "trades.csv")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-DATA_FILE = "learning.json"
+# -------------------
+# INIT CSV
+# -------------------
+if not os.path.exists(LOG_FILE):
+    with open(LOG_FILE, "w", newline="") as f:
+        csv.writer(f).writerow([
+            "time","symbol","direction","tp","sl","timeframe","martingale","result"
+        ])
 
-# =========================
-# STATE
-# =========================
+# -------------------
+# GLOBAL VARIABLES
+# -------------------
+market_volatility = {}      # store tick history per symbol
+cooldown_tracker = {}       # prevent spamming same signals
+adaptive_trend_factor = {}  # weekly adaptive adjustment
 
-learning = {}
-active_trades = {}
-
-session = {
-    "image": None,
-    "symbol": None
-}
-
-tick_buffer = []
-current_symbol = "R_100"  # default
-stream_task = None
-
-# =========================
-# LOAD / SAVE
-# =========================
-
-def load_learning():
-    global learning
-    if os.path.exists(DATA_FILE):
-        learning = json.load(open(DATA_FILE))
-    else:
-        learning = {}
-
-def save_learning():
-    with open(DATA_FILE, "w") as f:
-        json.dump(learning, f, indent=2)
-
-# =========================
-# DERIV STREAM (AUTO RUNNING)
-# =========================
-
-async def deriv_stream(symbol):
-
-    global tick_buffer, current_symbol
-
+# -------------------
+# FETCH ALL SYMBOLS
+# -------------------
+async def fetch_all_pairs(ws):
+    await ws.send(json.dumps({"active_symbols": "brief"}))
     while True:
-        try:
-            async with websockets.connect(WS_URL) as ws:
+        msg = await ws.recv()
+        data = json.loads(msg)
+        if "active_symbols" in data:
+            symbols = [s["symbol"] for s in data["active_symbols"]]
+            otc_pairs = [s for s in symbols if s.startswith("OTC")]
+            crypto_pairs = ["CRYPTO:BTCUSD","CRYPTO:ETHUSD","CRYPTO:XRPUSD",
+                            "CRYPTO:LTCUSD","CRYPTO:BCHUSD","CRYPTO:ADAUSD","CRYPTO:DOGEUSD"]
+            return otc_pairs + crypto_pairs
 
-                await ws.send(json.dumps({
-                    "ticks": symbol,
-                    "subscribe": 1
-                }))
+# -------------------
+# MARKET LISTENER
+# -------------------
+async def market_listener():
+    global market_volatility
+    async with websockets.connect(DERIV_WS) as ws:
+        pairs = await fetch_all_pairs(ws)
+        print(f"Monitoring {len(pairs)} symbols: {pairs}")
 
-                current_symbol = symbol
-                tick_buffer = []
+        # Subscribe to all pairs
+        for p in pairs:
+            await ws.send(json.dumps({"ticks": p, "subscribe": 1}))
+            market_volatility[p] = []
 
-                print(f"Streaming: {symbol}")
+        async for msg in ws:
+            data = json.loads(msg)
+            if "tick" not in data:
+                continue
+            symbol = data["tick"]["symbol"]
+            quote = data["tick"]["quote"]
+            market_volatility[symbol].append(quote)
+            if len(market_volatility[symbol]) > 100:
+                market_volatility[symbol].pop(0)
 
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
+# -------------------
+# SIGNAL GENERATION (TP/SL FIXED)
+# -------------------
+def analyze_pair(symbol, ticks):
+    """
+    Adaptive signal:
+    - Compare last tick vs moving average
+    - Determine trend and direction
+    - Calculate TP/SL properly
+    - Determine optimal timeframe based on TP/SL distance
+    """
+    if len(ticks) < 10:
+        return None  # not enough data
 
-                    if "tick" in data:
-                        price = float(data["tick"]["quote"])
-                        tick_buffer.append(price)
+    series = np.array(ticks)
+    ma = np.mean(series[-10:])
+    last = series[-1]
 
-                        if len(tick_buffer) > 100:
-                            tick_buffer.pop(0)
+    # adaptive weekly factor
+    factor = adaptive_trend_factor.get(symbol, 1.0)
 
-        except Exception as e:
-            print("Reconnecting WS...", e)
-            await asyncio.sleep(2)
-
-# =========================
-# SWITCH PAIR STREAM
-# =========================
-
-async def switch_symbol(symbol):
-
-    global stream_task
-
-    if stream_task:
-        stream_task.cancel()
-
-    stream_task = asyncio.create_task(deriv_stream(symbol))
-
-# =========================
-# IMAGE ANALYSIS
-# =========================
-
-def image_analysis(image):
-
-    img = np.array(image.convert("L"))
-    series = np.mean(img, axis=0)
-    diff = np.diff(series)
-
-    momentum = np.std(diff)
-
-    up = np.sum(diff > 0)
-    down = np.sum(diff < 0)
-
-    if up > down:
+    if last > ma * (1 + 0.001*factor):
         direction = "BUY"
-    elif down > up:
+    elif last < ma * (1 - 0.001*factor):
         direction = "SELL"
     else:
-        direction = "NEUTRAL"
+        return None
 
-    return direction, momentum
+    vol = np.std(series[-10:]) + 1e-5
+    base = last
 
-# =========================
-# MARKET ANALYSIS (FIXED)
-# =========================
-
-def market_analysis():
-
-    if len(tick_buffer) < 20:
-        return "NEUTRAL", 0
-
-    diff = np.diff(tick_buffer[-20:])
-    strength = np.mean(diff)
-
-    if abs(strength) < 0.00001:
-        return "NEUTRAL", 0
-
-    direction = "BUY" if strength > 0 else "SELL"
-
-    return direction, abs(strength)
-
-# =========================
-# ENTRY TIME (STRICT 2 MIN)
-# =========================
-
-def entry_time():
-    now = datetime.now(TIMEZONE)
-    return now + timedelta(minutes=2)
-
-# =========================
-# DECISION ENGINE (BALANCED)
-# =========================
-
-def decision(img_dir, mkt_dir, momentum, strength):
-
-    score = 0
-
-    if img_dir == mkt_dir:
-        score += 2
-    elif mkt_dir != "NEUTRAL":
-        score -= 1
-
-    score += strength * 10
-    score += momentum / 30
-
-    if score > 1:
-        final = img_dir
-    elif score < -1:
-        final = mkt_dir
+    # Robust TP and SL calculation
+    risk_multiplier = 50  # Base risk factor
+    if direction == "BUY":
+        sl = base - vol * risk_multiplier
+        tp = base + vol * risk_multiplier * 2  # TP is double the SL distance
     else:
-        final = mkt_dir if mkt_dir != "NEUTRAL" else img_dir
+        sl = base + vol * risk_multiplier
+        tp = base - vol * risk_multiplier * 2
 
-    return final, score
+    # Ensure minimum TP/SL distance
+    min_distance = 0.5 if "CRYPTO" in symbol else 0.01
+    if abs(tp - sl) < min_distance:
+        if direction == "BUY":
+            tp = base + min_distance
+            sl = base - min_distance
+        else:
+            tp = base - min_distance
+            sl = base + min_distance
 
-# =========================
-# PROCESS SIGNAL
-# =========================
+    # Dynamically determine timeframe for both Forex and Binary Options
+    distance = abs(tp - sl)
+    if distance <= 5:
+        timeframe = "M1"
+    elif distance <= 10:
+        timeframe = "M5"
+    elif distance <= 20:
+        timeframe = "M15"
+    elif distance <= 40:
+        timeframe = "M30"
+    else:
+        timeframe = "H1"
 
-async def process_signal(update):
-
-    symbol = session["symbol"]
-    image = session["image"]
-
-    img_dir, momentum = image_analysis(image)
-    mkt_dir, strength = market_analysis()
-
-    final, score = decision(img_dir, mkt_dir, momentum, strength)
-
-    trade_id = f"{symbol}_{datetime.now().timestamp()}"
-
-    active_trades[trade_id] = {
+    return {
         "symbol": symbol,
-        "direction": final
+        "direction": direction,
+        "tp": round(tp, 5),
+        "sl": round(sl, 5),
+        "timeframe": timeframe
     }
 
-    msg = (
-        f"📊 AI SIGNAL (REAL)\n\n"
-        f"PAIR: {symbol}\n"
-        f"DIRECTION: {final}\n"
-        f"CONFIDENCE: {round(score,2)}\n\n"
-        f"ENTRY: {entry_time().strftime('%H:%M:%S')}\n"
-        f"EXPIRY: 2 MINUTES\n"
-        f"STREAM: {current_symbol}"
-    )
+# -------------------
+# SAVE TRADE
+# -------------------
+def save_trade(trade, martingale=0):
+    with open(LOG_FILE, "a", newline="") as f:
+        csv.writer(f).writerow([
+            datetime.now(TIMEZONE), trade["symbol"], trade["direction"], trade["tp"], trade["sl"],
+            trade["timeframe"], martingale, "PENDING"
+        ])
 
-    keyboard = [[
-        InlineKeyboardButton("WIN", callback_data=f"win|{trade_id}"),
-        InlineKeyboardButton("LOSS", callback_data=f"loss|{trade_id}")
-    ]]
+# -------------------
+# TELEGRAM SIGNAL
+# -------------------
+async def send_signal(trade, context, martingale=0):
+    keyboard = [
+        [InlineKeyboardButton("✅ WIN", callback_data="win"),
+         InlineKeyboardButton("❌ LOSS", callback_data="loss")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    msg = f"""
+📊 SIGNAL
+Symbol: {trade['symbol']}
+Direction: {trade['direction']}
+TP: {trade['tp']}
+SL: {trade['sl']}
+Timeframe: {trade['timeframe']}
+Martingale: {martingale}
+"""
+    await context.bot.send_message(chat_id=CHAT_ID, text=msg, reply_markup=reply_markup)
+    save_trade(trade, martingale)
 
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+# -------------------
+# GENERATE SIGNALS LOOP (ALL SYMBOLS SIMULTANEOUSLY)
+# -------------------
+async def generate_signals(app):
+    while True:
+        for symbol, ticks in market_volatility.items():
+            trade = analyze_pair(symbol, ticks)
+            if trade:
+                now = datetime.now(TIMEZONE)
+                last_time = cooldown_tracker.get(symbol)
+                if last_time and (now - last_time).total_seconds() < 120:
+                    continue
+                cooldown_tracker[symbol] = now
 
-    session["image"] = None
-    session["symbol"] = None
+                # Send primary signal and Martingale 3 levels
+                await send_signal(trade, app, martingale=0)
+                for i in range(1,4):
+                    # Martingale entry: 2 min apart
+                    await asyncio.sleep(120)
+                    await send_signal(trade, app, martingale=i)
+        await asyncio.sleep(5)  # small delay to loop again
 
-# =========================
-# HANDLERS
-# =========================
+# -------------------
+# TELEGRAM HANDLERS
+# -------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("AI Trading Signal Bot is active. Signals will appear automatically.")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-
-    bio = BytesIO()
-    await file.download_to_memory(bio)
-    bio.seek(0)
-
-    session["image"] = Image.open(bio)
-
-    if not session["symbol"]:
-        await update.message.reply_text("📌 Send pair (e.g. EURUSD)")
-        return
-
-    await process_signal(update)
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    symbol = update.message.text.strip().upper()
-
-    session["symbol"] = symbol
-
-    await switch_symbol(symbol)
-
-    if not session["image"]:
-        await update.message.reply_text(f"📡 Pair set: {symbol}\nNow send screenshot")
-        return
-
-    await process_signal(update)
-
-# =========================
-# BUTTONS
-# =========================
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    result, trade_id = query.data.split("|")
-
-    trade = active_trades.get(trade_id)
-
-    if not trade:
-        await query.edit_message_text("Trade expired")
-        return
-
-    symbol = trade["symbol"]
-    direction = trade["direction"]
-
-    if symbol not in learning:
-        learning[symbol] = {"BUY": 0, "SELL": 0}
-
-    if result == "win":
-        learning[symbol][direction] += 1
+    if query.data == "win":
+        update_last_result("WIN")
+        await query.edit_message_text("Recorded: WIN ✅")
     else:
-        learning[symbol][direction] -= 1
+        update_last_result("LOSS")
+        await query.edit_message_text("Recorded: LOSS ❌")
 
-    save_learning()
-    del active_trades[trade_id]
+def update_last_result(result):
+    rows = []
+    with open(LOG_FILE, "r") as f:
+        rows = list(csv.reader(f))
+    rows[-1][-1] = result
+    with open(LOG_FILE, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
 
-    await query.edit_message_text(f"{result.upper()} recorded ✔")
-
-# =========================
-# START BACKGROUND STREAM
-# =========================
-
-async def start_background(app):
-    global stream_task
-    stream_task = asyncio.create_task(deriv_stream(current_symbol))
-
-# =========================
+# -------------------
 # MAIN
-# =========================
-
-def main():
-
-    load_learning()
-
+# -------------------
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_button))
+    asyncio.create_task(market_listener())
+    asyncio.create_task(generate_signals(app))
+    print("Bot running...")
+    await app.run_polling()
 
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(buttons))
-
-    app.post_init = start_background
-
-    print("🚀 V6 FINAL RUNNING (AUTO STREAM ENABLED)")
-
-    app.run_polling()
-
+# -------------------
+# ENTRY POINT
+# -------------------
 if __name__ == "__main__":
-    main()
+    import nest_asyncio
+    nest_asyncio.apply()
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_forever()
